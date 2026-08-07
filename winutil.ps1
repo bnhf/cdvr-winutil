@@ -47,14 +47,12 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
         "&([ScriptBlock]::Create((irm https://raw.githubusercontent.com/bnhf/cdvr-winutil/main/winutil.ps1))) $($argList -join ' ')"
     }
 
+    # Elevate powershell/pwsh directly rather than wrapping in wt.exe - Windows Terminal's
+    # wt.exe is often an MSIX app-execution-alias stub, and UAC elevation via ShellExecute's
+    # "runas" verb frequently fails to cross that redirection (error 0x80070005/0x80070002,
+    # "error ... when launching '...'" - a known recurring class of issue upstream).
     $powershellCmd = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
-    $processCmd = if (Get-Command wt.exe -ErrorAction SilentlyContinue) { "wt.exe" } else { "$powershellCmd" }
-
-    if ($processCmd -eq "wt.exe") {
-        Start-Process $processCmd -ArgumentList "$powershellCmd -ExecutionPolicy Bypass -NoProfile -Command `"$script`"" -Verb RunAs
-    } else {
-        Start-Process $processCmd -ArgumentList "-ExecutionPolicy Bypass -NoProfile -Command `"$script`"" -Verb RunAs
-    }
+    Start-Process $powershellCmd -ArgumentList "-ExecutionPolicy Bypass -NoProfile -Command `"$script`"" -Verb RunAs
 
     break
 }
