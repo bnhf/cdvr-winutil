@@ -57,7 +57,7 @@ function Show-WinUtilPromptDialog {
         $msgBlock.Text = $Message
         $msgBlock.TextWrapping = [Windows.TextWrapping]::Wrap
         $msgBlock.Margin = New-Object Windows.Thickness(0, 0, 0, 12)
-        $stack.Children.Add($msgBlock)
+        [void]$stack.Children.Add($msgBlock)
     }
 
     $errorBlock = New-Object Windows.Controls.TextBlock
@@ -65,7 +65,7 @@ function Show-WinUtilPromptDialog {
     $errorBlock.TextWrapping = [Windows.TextWrapping]::Wrap
     $errorBlock.Margin = New-Object Windows.Thickness(0, 0, 0, 8)
     $errorBlock.Visibility = [Windows.Visibility]::Collapsed
-    $stack.Children.Add($errorBlock)
+    [void]$stack.Children.Add($errorBlock)
 
     # $inputs[name] holds a small record per field: what controls back it, whether it's a
     # secret field (Show/Hide toggle over a PasswordBox+TextBox pair), and its MinLength.
@@ -74,7 +74,7 @@ function Show-WinUtilPromptDialog {
         $label = New-Object Windows.Controls.TextBlock
         $label.Text = $prompt.label
         $label.Margin = New-Object Windows.Thickness(0, 6, 0, 2)
-        $stack.Children.Add($label)
+        [void]$stack.Children.Add($label)
 
         $minLength = if ($prompt.minLength) { [int]$prompt.minLength } else { 0 }
 
@@ -117,7 +117,7 @@ function Show-WinUtilPromptDialog {
             })
 
             $fieldGrid.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
-            $stack.Children.Add($fieldGrid)
+            [void]$stack.Children.Add($fieldGrid)
             $inputs[$prompt.name] = [pscustomobject]@{
                 Secret        = $true
                 PasswordField = $passwordField
@@ -128,7 +128,7 @@ function Show-WinUtilPromptDialog {
         } else {
             $field = New-Object Windows.Controls.TextBox
             $field.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
-            $stack.Children.Add($field)
+            [void]$stack.Children.Add($field)
             $inputs[$prompt.name] = [pscustomobject]@{
                 Secret    = $false
                 TextField = $field
@@ -142,7 +142,7 @@ function Show-WinUtilPromptDialog {
     $buttonPanel.Orientation = [Windows.Controls.Orientation]::Horizontal
     $buttonPanel.HorizontalAlignment = [Windows.HorizontalAlignment]::Right
     $buttonPanel.Margin = New-Object Windows.Thickness(0, 12, 0, 0)
-    $stack.Children.Add($buttonPanel)
+    [void]$stack.Children.Add($buttonPanel)
 
     $script:winutilPromptResult = $null
 
@@ -160,7 +160,7 @@ function Show-WinUtilPromptDialog {
         $script:winutilPromptResult = $null
         $dialog.Close()
     })
-    $buttonPanel.Children.Add($cancelButton)
+    [void]$buttonPanel.Children.Add($cancelButton)
 
     $okButton = New-Object Windows.Controls.Button
     $okButton.Content = "OK"
@@ -196,7 +196,7 @@ function Show-WinUtilPromptDialog {
         $script:winutilPromptResult = $result
         $dialog.Close()
     })
-    $buttonPanel.Children.Add($okButton)
+    [void]$buttonPanel.Children.Add($okButton)
 
     $dialog.Add_KeyDown({
         if ($_.Key -eq 'Escape') {
