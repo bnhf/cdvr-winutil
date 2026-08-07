@@ -42,20 +42,10 @@ function Invoke-WPFTab {
         Find-TweaksByNameOrDescription -SearchString ""
     }
 
-    # Show search bar in Install, Tweaks, and AppX tabs
-    if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5) {
-        $sync.SearchBar.Visibility = "Visible"
-        $searchIcon = ($sync.Form.FindName("SearchBar").Parent.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and $_.Text -eq [char]0xE721 })[0]
-        if ($searchIcon) {
-            $searchIcon.Visibility = "Visible"
-        }
-    } else {
-        $sync.SearchBar.Visibility = "Collapsed"
-        $searchIcon = ($sync.Form.FindName("SearchBar").Parent.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and $_.Text -eq [char]0xE721 })[0]
-        if ($searchIcon) {
-            $searchIcon.Visibility = "Collapsed"
-        }
-        # Hide the clear button if it's visible
-        $sync.SearchBarClearButton.Visibility = "Collapsed"
+    # Install is the only tab, so the search bar is always shown
+    $sync.SearchBar.Visibility = "Visible"
+    $searchIcon = ($sync.Form.FindName("SearchBar").Parent.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and $_.Text -eq [char]0xE721 })[0]
+    if ($searchIcon) {
+        $searchIcon.Visibility = "Visible"
     }
 }

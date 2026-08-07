@@ -3,9 +3,12 @@ System.Management.Automation.dll
 Microsoft.PowerShell.ConsoleHost.dll
 
 winutil.exe.config
-winutil.ps1
 binary/
 testResults.xml
+
+# NOTE: winutil.ps1 is intentionally NOT ignored in this fork - it's committed and served
+# directly via raw.githubusercontent.com for the `irm | iex` one-liner. Run Compile.ps1 and
+# commit the regenerated file alongside any source change.
 
 # general software/os specific
 desktop.ini

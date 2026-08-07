@@ -5,7 +5,10 @@ function Invoke-WPFInstall {
     #>
     param(
         [Parameter(Mandatory = $false)]
-        [PSObject[]]$PackagesToInstall = $($sync.selectedApps | Foreach-Object { $sync.configs.applicationsHashtable.$_ })
+        [PSObject[]]$PackagesToInstall = $($sync.selectedApps | Foreach-Object {
+            $pkg = $sync.configs.applicationsHashtable.$_
+            if ($pkg) { $pkg | Add-Member -NotePropertyName Key -NotePropertyValue ($_ -replace '^WPFInstall', '') -PassThru -Force }
+        })
     )
 
 
@@ -21,6 +24,16 @@ function Invoke-WPFInstall {
         return
     }
 
+    # Prerequisite checks and value prompts show modal dialogs, so they must run here on the
+    # UI thread - before the selection is handed off to the background install runspace.
+    $PackagesToInstall = Resolve-WinUtilPrerequisites -PackagesToInstall $PackagesToInstall
+    $PackagesToInstall = Resolve-WinUtilPackagePrompts -PackagesToInstall $PackagesToInstall
+
+    if ($PackagesToInstall.Count -eq 0) {
+        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prerequisite/prompt resolution."
+        return
+    }
+
     $ManagerPreference = $sync.preferences.packagemanager
     Write-WinUtilLog -Component "Install" -Message "Install requested for $(@($PackagesToInstall).Count) selected package(s) using preference: $ManagerPreference"
     $packageSummary = Get-WinUtilPackageLogSummary -Packages $PackagesToInstall -Preference $ManagerPreference
@@ -33,10 +46,16 @@ function Invoke-WPFInstall {
 
         $packagesWinget = $packagesSorted['Winget']
         $packagesChoco = $packagesSorted['Choco']
-        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count
+        $packagesDirect = $packagesSorted['Direct']
+        $packagesGithub = $packagesSorted['Github']
+        $packagesNpm = $packagesSorted['Npm']
+        $packagesWslFeature = $packagesSorted['WslFeature']
+        $packagesWslDistro = $packagesSorted['WslDistro']
+        $packagesWslCommand = $packagesSorted['WslCommand']
+        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count)"
+        Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -83,6 +102,33 @@ function Invoke-WPFInstall {
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
+
+            foreach ($installBucket in @(
+                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
+                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } },
+                @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
+                @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
+                @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },
+                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } }
+            )) {
+                if (@($installBucket.Packages).Count -eq 0) { continue }
+
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                & $installBucket.Installer $installBucket.Packages
+
+                $completedPackages += @($installBucket.Packages).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
             Write-Host "==========================================="
             Write-Host "--      Installs have finished          ---"
             Write-Host "==========================================="

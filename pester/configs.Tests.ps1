@@ -165,8 +165,13 @@ Describe "Applications config" {
                 }
             }
 
+            $validInstallTypes = @("winget", "choco", "direct", "github", "npm", "wslFeature", "wslDistro", "wslCommand")
+            if ($entryFields -contains "installType" -and $validInstallTypes -contains [string]$entry.Value.installType) {
+                $hasInstallSource = $true
+            }
+
             if (-not $hasInstallSource) {
-                $invalidEntries.Add("$($entry.Name) missing winget/choco install source")
+                $invalidEntries.Add("$($entry.Name) missing winget/choco install source or a valid installType")
             }
         }
 

@@ -27,7 +27,14 @@ function Initialize-InstallCategoryAppList {
         }
         $sync.InstallAppRenderQueue = [System.Collections.Queue]::new()
 
-        foreach ($category in $($appsByCategory.Keys | Sort-Object)) {
+        # Categories render in this order; anything not listed falls back to the end, alphabetically.
+        $categoryOrder = @("Foundational", "Browsers", "Channels DVR", "Channels DVR Windows Clients", "Channels DVR Sources (non-Docker)")
+        $sortedCategories = $appsByCategory.Keys | Sort-Object -Property @(
+            @{ Expression = { $index = $categoryOrder.IndexOf($_); if ($index -lt 0) { [int]::MaxValue } else { $index } } },
+            @{ Expression = { $_ } }
+        )
+
+        foreach ($category in $sortedCategories) {
             # Create a container for category label + apps
             $categoryContainer = New-Object Windows.Controls.StackPanel
             $categoryContainer.Orientation = "Vertical"

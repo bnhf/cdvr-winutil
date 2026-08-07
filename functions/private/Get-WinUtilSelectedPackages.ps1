@@ -16,9 +16,21 @@ function Get-WinUtilSelectedPackages {
 
     $packagesWinget = [System.Collections.ArrayList]::new()
     $packagesChoco = [System.Collections.ArrayList]::new()
+    $packagesDirect = [System.Collections.ArrayList]::new()
+    $packagesGithub = [System.Collections.ArrayList]::new()
+    $packagesNpm = [System.Collections.ArrayList]::new()
+    $packagesWslFeature = [System.Collections.ArrayList]::new()
+    $packagesWslDistro = [System.Collections.ArrayList]::new()
+    $packagesWslCommand = [System.Collections.ArrayList]::new()
     $packages = @{
         Winget = $packagesWinget
         Choco = $packagesChoco
+        Direct = $packagesDirect
+        Github = $packagesGithub
+        Npm = $packagesNpm
+        WslFeature = $packagesWslFeature
+        WslDistro = $packagesWslDistro
+        WslCommand = $packagesWslCommand
     }
 
     function Add-PackageId {
@@ -37,6 +49,22 @@ function Get-WinUtilSelectedPackages {
     }
 
     foreach ($package in $PackageList) {
+        $installType = [string]$package.installType
+
+        # Packages with a custom installType bypass the winget/choco preference entirely -
+        # they carry their own install data (url, repo, npmPackage, distro, command, ...).
+        if (-not [string]::IsNullOrWhiteSpace($installType)) {
+            switch ($installType) {
+                "direct" { $null = $packagesDirect.Add($package) }
+                "github" { $null = $packagesGithub.Add($package) }
+                "npm" { $null = $packagesNpm.Add($package) }
+                "wslFeature" { $null = $packagesWslFeature.Add($package) }
+                "wslDistro" { $null = $packagesWslDistro.Add($package) }
+                "wslCommand" { $null = $packagesWslCommand.Add($package) }
+            }
+            continue
+        }
+
         switch ($Preference) {
             "Choco" {
                 if ([string]::IsNullOrWhiteSpace([string]$package.choco) -or $package.choco -eq "na") {

@@ -16,8 +16,9 @@ CC:::::::::::::::C       T:::::::::T            T:::::::::T
 CCC::::::::::::C         T:::::::::T            T:::::::::T
   CCCCCCCCCCCCC          TTTTTTTTTTT            TTTTTTTTTTT
 
-====Chris Titus Tech=====
-=====Windows Toolbox=====
+======CDVR WinUtil========
+=Channels DVR Installer===
+(fork of ChrisTitusTech/winutil)
 "@
 
 # Load the configuration files
@@ -215,10 +216,6 @@ $commonKeyEvents = {
         $keyEventArgs = $_
         switch ($_.SystemKey) {
             "I" { Invoke-WPFButton "WPFTab1BT"; $keyEventArgs.Handled = $true } # Navigate to Install tab and suppress Windows Warning Sound
-            "T" { Invoke-WPFButton "WPFTab2BT"; $keyEventArgs.Handled = $true } # Navigate to Tweaks tab
-            "C" { Invoke-WPFButton "WPFTab3BT"; $keyEventArgs.Handled = $true } # Navigate to Config tab
-            "U" { Invoke-WPFButton "WPFTab4BT"; $keyEventArgs.Handled = $true } # Navigate to Updates tab
-            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
         }
     }
     # Handle Ctrl key combinations for specific actions
@@ -301,9 +298,6 @@ $sync["Form"].Add_ContentRendered({
 
         # Show offline indicator
         Write-Host "Offline mode detected - Install tab disabled." -ForegroundColor Yellow
-
-        # Optionally switch to a different tab if install tab was going to be default
-        Invoke-WPFTab "WPFTab2BT"  # Switch to Tweaks tab instead
     }
     else {
         # Online - ensure install tab is enabled
@@ -365,16 +359,11 @@ $sync["SearchBar"].Add_TextChanged({
 
 # Quick Category Search Chips
 $sync["WPFSearchChipAll"].Add_Click({ Set-WinUtilAppCategoryFilter })
+$sync["WPFSearchChipFoundational"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Foundational" })
 $sync["WPFSearchChipBrowsers"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Browsers" })
-$sync["WPFSearchChipCommunications"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Communications" })
-$sync["WPFSearchChipDevelopment"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Development" })
-$sync["WPFSearchChipDocument"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Document" })
-$sync["WPFSearchChipGames"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Games" })
-$sync["WPFSearchChipMicrosoftTools"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Microsoft Tools" })
-$sync["WPFSearchChipMultimediaTools"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Multimedia Tools" })
-$sync["WPFSearchChipProTools"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Pro Tools" })
-$sync["WPFSearchChipSelfhostedTools"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Selfhosted Tools" })
-$sync["WPFSearchChipUtilities"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Utilities" })
+$sync["WPFSearchChipChannelsDVR"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR" })
+$sync["WPFSearchChipChannelsDVRClients"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR Windows Clients" })
+$sync["WPFSearchChipChannelsDVRSources"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR Sources (non-Docker)" })
 
 $sync["Form"].Add_Loaded({
     param($e)
@@ -425,6 +414,10 @@ $sync["AboutMenuItem"].Add_Click({
     Invoke-WPFPopup -Action "Hide" -Popups @("Settings")
 
     $authorInfo = @"
+CDVR WinUtil is a Channels DVR-focused fork of WinUtil.
+Fork      : <a href="https://github.com/bnhf/cdvr-winutil">bnhf/cdvr-winutil</a>
+
+Original WinUtil:
 Author   : <a href="https://github.com/ChrisTitusTech">@ChrisTitusTech</a>
 UI       : <a href="https://github.com/MyDrift-user">@MyDrift-user</a>, <a href="https://github.com/Marterich">@Marterich</a>
 Runspace : <a href="https://github.com/DeveloperDurp">@DeveloperDurp</a>, <a href="https://github.com/Marterich">@Marterich</a>
@@ -475,46 +468,6 @@ $sync["FontScalingApplyButton"].Add_Click({
     $scaleFactor = $sync.FontScalingSlider.Value
     Invoke-WinUtilFontScaling -ScaleFactor $scaleFactor
     Invoke-WPFPopup -Action "Hide" -Popups @("FontScaling")
-})
-
-# ── Win11ISO Tab button handlers ──────────────────────────────────────────────
-
-$sync["WPFWin11ISOBrowseButton"].Add_Click({
-    Invoke-WinUtilISOBrowse
-})
-
-$sync["WPFWin11ISODownloadLink"].Add_Click({
-    Start-Process "https://www.microsoft.com/software-download/windows11"
-})
-
-$sync["WPFWin11ISOMountButton"].Add_Click({
-    Invoke-WinUtilISOMountAndVerify
-})
-
-$sync["WPFWin11ISOModifyButton"].Add_Click({
-    Invoke-WinUtilISOModify
-})
-
-$sync["WPFWin11ISOChooseISOButton"].Add_Click({
-    $sync["WPFWin11ISOOptionUSB"].Visibility = "Collapsed"
-    Invoke-WinUtilISOExport
-})
-
-$sync["WPFWin11ISOChooseUSBButton"].Add_Click({
-    $sync["WPFWin11ISOOptionUSB"].Visibility = "Visible"
-    Invoke-WinUtilISORefreshUSBDrives
-})
-
-$sync["WPFWin11ISORefreshUSBButton"].Add_Click({
-    Invoke-WinUtilISORefreshUSBDrives
-})
-
-$sync["WPFWin11ISOWriteUSBButton"].Add_Click({
-    Invoke-WinUtilISOWriteUSB
-})
-
-$sync["WPFWin11ISOCleanResetButton"].Add_Click({
-    Invoke-WinUtilISOCleanAndReset
 })
 
 function Remove-WinUtilTempScript {
