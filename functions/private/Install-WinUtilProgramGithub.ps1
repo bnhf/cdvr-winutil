@@ -61,13 +61,19 @@ Function Install-WinUtilProgramGithub {
         try {
             if ($dest -like "*.msi") {
                 Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$dest`"" -Wait
+                Write-WinUtilLog -Component "Package" -Message "$name installed."
+                Remove-Item $dest -Force -ErrorAction SilentlyContinue
             } else {
-                Start-Process -FilePath $dest -Wait
+                # No known silent-install flag for these community-released installers, so this
+                # runs interactively - and some interactive installers launch a long-running
+                # application on completion that never exits, which would make -Wait block
+                # forever. Launch and move on instead of waiting; don't delete the downloaded
+                # file since the process may still be reading it after we return.
+                Start-Process -FilePath $dest
+                Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
             }
-            Write-WinUtilLog -Component "Package" -Message "$name installed."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run installer for ${name}: $_"
-        } finally {
             Remove-Item $dest -Force -ErrorAction SilentlyContinue
         }
     }
