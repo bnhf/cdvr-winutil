@@ -44,7 +44,14 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
     $script = if ($PSCommandPath) {
         "& { & `'$($PSCommandPath)`' $($argList -join ' ') }"
     } else {
-        "&([ScriptBlock]::Create((irm https://raw.githubusercontent.com/bnhf/cdvr-winutil/main/winutil.ps1))) $($argList -join ' ')"
+        # Download to a local temp file and elevate via that file, rather than fetching and
+        # executing the remote script inline within the elevated command - "download and
+        # immediately execute" is a well-known trigger for antivirus/Defender false positives.
+        # This also lets $PSCommandPath resolve normally in the elevated instance - matching
+        # the winutil-*.ps1 pattern Remove-WinUtilTempScript already expects and cleans up.
+        $tempScriptPath = Join-Path ([IO.Path]::GetTempPath()) "winutil-$([guid]::NewGuid().ToString('N')).ps1"
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/bnhf/cdvr-winutil/main/winutil.ps1" -OutFile $tempScriptPath -UseBasicParsing
+        "& { & `'$tempScriptPath`' $($argList -join ' ') }"
     }
 
     # Elevate powershell/pwsh directly rather than wrapping in wt.exe - Windows Terminal's
