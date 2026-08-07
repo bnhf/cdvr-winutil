@@ -99,7 +99,7 @@
         "distro": "Debian",
         "requires": ["wsl2", "debian", "dockerdesktop"],
         "prompts": [
-            { "name": "PORTAINER_PASSWORD", "label": "Portainer password", "secret": true }
+            { "name": "PORTAINER_PASSWORD", "label": "Desired Portainer password (12 character minimum)", "secret": true, "minLength": 12 }
         ],
         "command": "docker run -d --name olivetin-ezstart --pull always --add-host=host.docker.internal:host-gateway -p 1338:1337 -e EZ_START=-ezstart -e CHANNELS_DVR=host.docker.internal:8089 -e TZ=$(readlink /etc/localtime) -e HOST_DIR=$([[ \"$(uname)\" == \"Darwin\" ]] && echo \"$HOME\" || echo \"/data\") -e PORTAINER_PASSWORD='{{PORTAINER_PASSWORD}}' -v /config -v /var/run/docker.sock:/var/run/docker.sock bnhf/olivetin:latest",
         "foss": false
