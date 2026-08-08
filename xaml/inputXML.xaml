@@ -114,6 +114,12 @@
         <Setter Property="VerticalAlignment" Value="Center"/>
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="MaxWidth" Value="{DynamicResource AppEntryNameMaxWidth}"/>
+        <!-- Reserve 2 lines' height on every tile, not just names that actually wrap - so a
+             long name (e.g. "Streaming Library Manager") wrapping to a second line doesn't
+             make just that one tile taller than the rest of the grid. -->
+        <Setter Property="MinHeight" Value="{DynamicResource AppEntryNameMinHeight}"/>
     </Style>
     <Style x:Key="AppEntrySubtitleStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="{DynamicResource AppEntrySubtitleFontSize}"/>
@@ -121,6 +127,12 @@
         <Setter Property="Foreground" Value="{DynamicResource ToggleButtonOnColor}"/>
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="MaxWidth" Value="{DynamicResource AppEntryNameMaxWidth}"/>
+        <!-- Reserve 2 lines' height on every tile - the combined subtitle+handle text (e.g.
+             Olivetin's "(Includes Portainer) @bnhf") can wrap to a second line, and this keeps
+             that from making just that one tile taller than the rest of the grid. -->
+        <Setter Property="MinHeight" Value="{DynamicResource AppEntrySubtitleMinHeight}"/>
     </Style>
     <Style x:Key="AppEntryButtonStyle" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource IconButtonSize}"/>

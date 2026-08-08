@@ -1045,11 +1045,12 @@ function Initialize-InstallAppEntry {
         }
         [void]$contentPanel.Children.Add($icon)
 
-        # Create the TextBlock for the application name, plus a subtitle line (config/
-        # applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
-        # underneath it in an accent color. Always add the subtitle TextBlock, even when an
-        # entry has none, so every tile reserves the same two-line height - conditionally
-        # adding it made entries with a subtitle taller than every other tile in the grid.
+        # Create the TextBlock for the application name, plus a bottom line stacked
+        # underneath it in an accent color, combining config/applications.json "subtitle"
+        # (e.g. Olivetin's "(Includes Portainer)") and "handle" (the maintainer's CDVR forum
+        # handle, e.g. "@bnhf") when both are set. Always add this TextBlock, even when an
+        # entry has neither, so every tile reserves the same two-line height - conditionally
+        # adding it made entries with one taller than every other tile in the grid.
         $nameStack = New-Object Windows.Controls.StackPanel
         $nameStack.Orientation = "Vertical"
         $nameStack.VerticalAlignment = [Windows.VerticalAlignment]::Center
@@ -1059,9 +1060,10 @@ function Initialize-InstallAppEntry {
         $appName.Text = $app.content
         [void]$nameStack.Children.Add($appName)
 
+        $bottomLineParts = @($app.subtitle, $app.handle) | Where-Object { $_ }
         $appSubtitle = New-Object Windows.Controls.TextBlock
         $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
-        $appSubtitle.Text = if ($app.subtitle) { $app.subtitle } else { " " }
+        $appSubtitle.Text = if ($bottomLineParts.Count -gt 0) { $bottomLineParts -join " " } else { " " }
         [void]$nameStack.Children.Add($appSubtitle)
 
         [void]$contentPanel.Children.Add($nameStack)
@@ -2351,6 +2353,9 @@ function Invoke-WinUtilFontScaling {
         "TabButtonHeight",
         "IconButtonSize",
         "AppEntryWidth",
+        "AppEntryNameMaxWidth",
+        "AppEntryNameMinHeight",
+        "AppEntrySubtitleMinHeight",
         "SearchBarWidth",
         "SearchBarHeight",
         "CustomDialogWidth",
@@ -8789,6 +8794,15 @@ $sync.configs.applications = @'
     "winget": "Microsoft.WindowsTerminal",
     "foss": true
   },
+  "WPFInstalltailscale": {
+    "category": "Foundational",
+    "choco": "tailscale",
+    "content": "Tailscale",
+    "description": "Zero-config mesh VPN built on WireGuard, useful for reaching your Channels DVR server remotely without port forwarding.",
+    "link": "https://tailscale.com",
+    "winget": "Tailscale.Tailscale",
+    "foss": true
+  },
   "WPFInstalldockerdesktop": {
     "category": "Foundational",
     "choco": "docker-desktop",
@@ -8879,6 +8893,7 @@ $sync.configs.applications = @'
     "link": "https://getchannels.com/dvr-server/",
     "icon": "https://getchannels.com/favicon.ico",
     "webui": "http://localhost:8089",
+    "handle": "@Bobby_Vaughn",
     "installType": "direct",
     "url": "https://channels-dvr.s3.amazonaws.com/SetupChannelsDVR.exe",
     "args": "",
@@ -8887,12 +8902,13 @@ $sync.configs.applications = @'
   },
   "WPFInstallolivetin": {
     "category": "Channels DVR",
-    "content": "Olivetin (EZ-Start)",
-    "subtitle": "Includes Portainer",
+    "content": "Olivetin EZ-Start",
+    "subtitle": "(Includes Portainer)",
     "description": "Olivetin for Channels, run via docker inside the Debian WSL distro. Requires Docker Desktop with WSL integration enabled for Debian.",
     "link": "https://github.com/bnhf/OliveTin",
     "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
     "webui": "http://localhost:1338",
+    "handle": "@bnhf",
     "installType": "wslCommand",
     "distro": "Debian",
     "requires": [
@@ -8919,6 +8935,7 @@ $sync.configs.applications = @'
     "link": "https://github.com/babsonnexus/stream-link-manager-for-channels",
     "icon": "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/static/assets/img/slm_navicon.png",
     "webui": "http://localhost:5000",
+    "handle": "@babsonnexus",
     "installType": "streamLinkManager",
     "foss": true
   },
@@ -8928,6 +8945,7 @@ $sync.configs.applications = @'
     "description": "Desktop client for Channels DVR by jay3702.",
     "link": "https://github.com/jay3702/DVRDesk",
     "icon": "https://raw.githubusercontent.com/jay3702/DVRDesk/main/src-tauri/icons/icon.png",
+    "handle": "@jay343",
     "installType": "github",
     "repo": "jay3702/DVRDesk",
     "assetPattern": "*_x64-setup.exe",
@@ -8939,6 +8957,7 @@ $sync.configs.applications = @'
     "description": "Feral HTPC front-end for Channels DVR by nuken.",
     "link": "https://github.com/nuken/Feral-HTPC",
     "icon": "https://raw.githubusercontent.com/nuken/Feral-HTPC/main/Assets/appicon.ico",
+    "handle": "@Bobby_Vaughn",
     "installType": "github",
     "repo": "nuken/Feral-HTPC",
     "assetPattern": "*Setup.exe",
@@ -8950,6 +8969,7 @@ $sync.configs.applications = @'
     "description": "HTPC front-end for Channels DVR by nuken.",
     "link": "https://github.com/nuken/HTPC",
     "icon": "https://raw.githubusercontent.com/nuken/HTPC/main/Assets/Nucleus.png",
+    "handle": "@Bobby_Vaughn",
     "installType": "github",
     "repo": "nuken/HTPC",
     "assetPattern": "NucleusHTPC_Installer_*.exe",
@@ -8961,6 +8981,7 @@ $sync.configs.applications = @'
     "description": "Native Win32 client for Channels DVR written in Rust with WinUI3 styling, by mackid1993. Not affiliated or endorsed by Fancy Bits LLC. Early release (v0.0.1).",
     "link": "https://github.com/mackid1993/RustDVR",
     "icon": "https://git-scm.com/images/logos/downloads/Git-Icon-1788C.png",
+    "handle": "@mackid1993",
     "installType": "github",
     "repo": "mackid1993/RustDVR",
     "assetPattern": "RustDVR-Setup-*.exe",
@@ -8973,6 +8994,7 @@ $sync.configs.applications = @'
     "link": "https://github.com/nuken/Pluto-Windows_4C",
     "icon": "https://raw.githubusercontent.com/nuken/Pluto-Windows_4C/main/icon.ico",
     "webui": "http://localhost:7777",
+    "handle": "@Bobby_Vaughn",
     "installType": "github",
     "repo": "nuken/Pluto-Windows_4C",
     "assetPattern": "PlutoForChannels*.exe",
@@ -8985,6 +9007,7 @@ $sync.configs.applications = @'
     "link": "https://github.com/nuken/Android-ADB-Bridge",
     "icon": "https://raw.githubusercontent.com/nuken/Android-ADB-Bridge/main/icon.ico",
     "webui": "http://localhost:8888/status",
+    "handle": "@Bobby_Vaughn",
     "installType": "github",
     "repo": "nuken/Android-ADB-Bridge",
     "assetPattern": "AndroidBridge_Setup_*.exe",
@@ -8997,6 +9020,7 @@ $sync.configs.applications = @'
     "link": "https://github.com/hjdhjd/prismcast",
     "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
     "webui": "http://localhost:5589",
+    "handle": "@hjd",
     "installType": "npm",
     "npmPackage": "prismcast",
     "postInstallCommand": "prismcast service install",
@@ -9846,6 +9870,9 @@ $sync.configs.themes = @'
     "AppEntryWidth": "220",
     "AppEntryFontSize": "13.2",
     "AppEntrySubtitleFontSize": "10.5",
+    "AppEntryNameMaxWidth": "150",
+    "AppEntryNameMinHeight": "34",
+    "AppEntrySubtitleMinHeight": "27",
     "AppEntryIconSize": "28",
     "AppEntryMargin": "3",
     "AppEntryBorderThickness": "1",
@@ -11752,6 +11779,12 @@ $inputXML = @'
         <Setter Property="VerticalAlignment" Value="Center"/>
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="MaxWidth" Value="{DynamicResource AppEntryNameMaxWidth}"/>
+        <!-- Reserve 2 lines' height on every tile, not just names that actually wrap - so a
+             long name (e.g. "Streaming Library Manager") wrapping to a second line doesn't
+             make just that one tile taller than the rest of the grid. -->
+        <Setter Property="MinHeight" Value="{DynamicResource AppEntryNameMinHeight}"/>
     </Style>
     <Style x:Key="AppEntrySubtitleStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="{DynamicResource AppEntrySubtitleFontSize}"/>
@@ -11759,6 +11792,12 @@ $inputXML = @'
         <Setter Property="Foreground" Value="{DynamicResource ToggleButtonOnColor}"/>
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="MaxWidth" Value="{DynamicResource AppEntryNameMaxWidth}"/>
+        <!-- Reserve 2 lines' height on every tile - the combined subtitle+handle text (e.g.
+             Olivetin's "(Includes Portainer) @bnhf") can wrap to a second line, and this keeps
+             that from making just that one tile taller than the rest of the grid. -->
+        <Setter Property="MinHeight" Value="{DynamicResource AppEntrySubtitleMinHeight}"/>
     </Style>
     <Style x:Key="AppEntryButtonStyle" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource IconButtonSize}"/>
