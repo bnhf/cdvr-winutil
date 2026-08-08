@@ -43,6 +43,7 @@ function Invoke-WPFUnInstall {
         $packagesWinget = $packagesSorted['Winget']
         $packagesChoco = $packagesSorted['Choco']
         $packagesNpm = $packagesSorted['Npm']
+        $packagesStreamLinkManager = $packagesSorted['StreamLinkManager']
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
         # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
@@ -70,10 +71,10 @@ function Invoke-WPFUnInstall {
         foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
         foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -165,6 +166,22 @@ function Invoke-WPFUnInstall {
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled WSL command packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
+            if ($packagesStreamLinkManager.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Streaming Library Manager ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Uninstall-WinUtilStreamLinkManager -Packages $packagesStreamLinkManager
+                $completedPackages += @($packagesStreamLinkManager).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Streaming Library Manager ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }

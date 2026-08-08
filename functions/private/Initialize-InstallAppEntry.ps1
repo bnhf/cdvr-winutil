@@ -101,9 +101,11 @@ function Initialize-InstallAppEntry {
         }
         [void]$contentPanel.Children.Add($icon)
 
-        # Create the TextBlock for the application name, plus an optional subtitle line
-        # (config/applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
-        # underneath it in an accent color - only takes up space when an entry actually sets one.
+        # Create the TextBlock for the application name, plus a subtitle line (config/
+        # applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
+        # underneath it in an accent color. Always add the subtitle TextBlock, even when an
+        # entry has none, so every tile reserves the same two-line height - conditionally
+        # adding it made entries with a subtitle taller than every other tile in the grid.
         $nameStack = New-Object Windows.Controls.StackPanel
         $nameStack.Orientation = "Vertical"
         $nameStack.VerticalAlignment = [Windows.VerticalAlignment]::Center
@@ -113,12 +115,10 @@ function Initialize-InstallAppEntry {
         $appName.Text = $app.content
         [void]$nameStack.Children.Add($appName)
 
-        if ($app.subtitle) {
-            $appSubtitle = New-Object Windows.Controls.TextBlock
-            $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
-            $appSubtitle.Text = $app.subtitle
-            [void]$nameStack.Children.Add($appSubtitle)
-        }
+        $appSubtitle = New-Object Windows.Controls.TextBlock
+        $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
+        $appSubtitle.Text = if ($app.subtitle) { $app.subtitle } else { " " }
+        [void]$nameStack.Children.Add($appSubtitle)
 
         [void]$contentPanel.Children.Add($nameStack)
         $checkBox.Content = $contentPanel

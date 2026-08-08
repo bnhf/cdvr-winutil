@@ -52,10 +52,11 @@ function Invoke-WPFInstall {
         $packagesWslFeature = $packagesSorted['WslFeature']
         $packagesWslDistro = $packagesSorted['WslDistro']
         $packagesWslCommand = $packagesSorted['WslCommand']
-        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count
+        $packagesStreamLinkManager = $packagesSorted['StreamLinkManager']
+        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count)"
+        Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -109,7 +110,8 @@ function Invoke-WPFInstall {
                 @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
                 @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
                 @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },
-                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } }
+                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } },
+                @{ Packages = $packagesStreamLinkManager; Label = "Streaming Library Manager"; Installer = { param($pkgs) Install-WinUtilStreamLinkManager -Packages $pkgs } }
             )) {
                 if (@($installBucket.Packages).Count -eq 0) { continue }
 

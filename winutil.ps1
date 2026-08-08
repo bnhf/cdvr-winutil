@@ -760,6 +760,7 @@ function Get-WinUtilSelectedPackages {
     $packagesWslFeature = [System.Collections.ArrayList]::new()
     $packagesWslDistro = [System.Collections.ArrayList]::new()
     $packagesWslCommand = [System.Collections.ArrayList]::new()
+    $packagesStreamLinkManager = [System.Collections.ArrayList]::new()
     $packages = @{
         Winget = $packagesWinget
         Choco = $packagesChoco
@@ -769,6 +770,7 @@ function Get-WinUtilSelectedPackages {
         WslFeature = $packagesWslFeature
         WslDistro = $packagesWslDistro
         WslCommand = $packagesWslCommand
+        StreamLinkManager = $packagesStreamLinkManager
     }
 
     function Add-PackageId {
@@ -799,6 +801,7 @@ function Get-WinUtilSelectedPackages {
                 "wslFeature" { $null = $packagesWslFeature.Add($package) }
                 "wslDistro" { $null = $packagesWslDistro.Add($package) }
                 "wslCommand" { $null = $packagesWslCommand.Add($package) }
+                "streamLinkManager" { $null = $packagesStreamLinkManager.Add($package) }
             }
             continue
         }
@@ -1042,9 +1045,11 @@ function Initialize-InstallAppEntry {
         }
         [void]$contentPanel.Children.Add($icon)
 
-        # Create the TextBlock for the application name, plus an optional subtitle line
-        # (config/applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
-        # underneath it in an accent color - only takes up space when an entry actually sets one.
+        # Create the TextBlock for the application name, plus a subtitle line (config/
+        # applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
+        # underneath it in an accent color. Always add the subtitle TextBlock, even when an
+        # entry has none, so every tile reserves the same two-line height - conditionally
+        # adding it made entries with a subtitle taller than every other tile in the grid.
         $nameStack = New-Object Windows.Controls.StackPanel
         $nameStack.Orientation = "Vertical"
         $nameStack.VerticalAlignment = [Windows.VerticalAlignment]::Center
@@ -1054,12 +1059,10 @@ function Initialize-InstallAppEntry {
         $appName.Text = $app.content
         [void]$nameStack.Children.Add($appName)
 
-        if ($app.subtitle) {
-            $appSubtitle = New-Object Windows.Controls.TextBlock
-            $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
-            $appSubtitle.Text = $app.subtitle
-            [void]$nameStack.Children.Add($appSubtitle)
-        }
+        $appSubtitle = New-Object Windows.Controls.TextBlock
+        $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
+        $appSubtitle.Text = if ($app.subtitle) { $app.subtitle } else { " " }
+        [void]$nameStack.Children.Add($appSubtitle)
 
         [void]$contentPanel.Children.Add($nameStack)
         $checkBox.Content = $contentPanel
@@ -1608,6 +1611,20 @@ Function Install-WinUtilProgramNpm {
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
         $process = Start-Process -FilePath "npm" -ArgumentList @($npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
+
+        # Some npm-distributed tools need a separate step to actually start running (or set up
+        # their own auto-start) after the package itself is installed - e.g. Prismcast installs
+        # as a dormant CLI until "prismcast service install" registers and starts it as a
+        # background service.
+        if ($Action -eq "Install" -and $process.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($package.postInstallCommand)) {
+            Write-WinUtilLog -Component "Package" -Message "Running post-install step for $name`: $($package.postInstallCommand)"
+            try {
+                & ([scriptblock]::Create($package.postInstallCommand))
+                Write-WinUtilLog -Component "Package" -Message "$name post-install step completed"
+            } catch {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
+            }
+        }
     }
 }
 
@@ -1653,6 +1670,86 @@ Function Install-WinUtilProgramWinget {
                 ""
             }
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$Action winget package FAILED: $program (exit code: $($process.ExitCode)).$hint"
+        }
+    }
+}
+
+Function Install-WinUtilStreamLinkManager {
+    <#
+    .SYNOPSIS
+        Installs Streaming Library Manager natively, without running the upstream slm.bat
+        installer.
+
+    .DESCRIPTION
+        slm.bat's own "install" command requires an interactive Y/N keypress via the batch
+        "choice" builtin, with no documented silent flag - not automatable without piping
+        input past the prompt as a workaround. Instead, this replicates slm.bat's underlying
+        steps directly (per its source at .../executables/slm.bat): download the same packaged
+        Windows release, extract it into a fixed install directory, then register and start it,
+        rather than relying on the batch script at all.
+
+        The download itself is a Dropbox link hardcoded in slm.bat - there's no GitHub release
+        asset for this app - so this has a real, if unavoidable, dependency on a link the
+        project maintainer controls rather than a versioned GitHub artifact.
+
+        No uninstall is documented upstream either. Because this owns the entire install
+        location, Uninstall-WinUtilStreamLinkManager can safely remove it outright: stop the
+        process, unregister the scheduled task, delete the install directory.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Packages
+    )
+
+    # Same link slm.bat itself downloads from for a normal (non-prerelease) install.
+    $downloadUrl = "https://www.dropbox.com/scl/fi/apw33xi80jjivyjp9rxb4/slm_windows.zip?rlkey=1m5zj7qz9ittguispsi00nyar&dl=1"
+    $taskName = "Streaming Library Manager"
+
+    foreach ($package in $Packages) {
+        $name = $package.content
+        $installDir = Join-Path $env:LocalAppData "StreamLinkManager"
+        $zipPath = Join-Path $env:TEMP "slm_windows_$([guid]::NewGuid().ToString('N')).zip"
+        $extractPath = Join-Path $env:TEMP "slm_windows_extract_$([guid]::NewGuid().ToString('N'))"
+
+        Write-WinUtilLog -Component "Package" -Message "Installing $name to $installDir"
+        try {
+            # Stop any running instance first so its files aren't locked during overwrite -
+            # slm.bat does the same before it re-extracts over an existing install.
+            Get-Process -Name "slm" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+
+            Write-WinUtilLog -Component "Package" -Message "Downloading $name"
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
+
+            Write-WinUtilLog -Component "Package" -Message "Extracting $name"
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+
+            if (-not (Test-Path $installDir)) {
+                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+            }
+            Copy-Item -Path (Join-Path $extractPath '*') -Destination $installDir -Recurse -Force
+
+            $exePath = Join-Path $installDir "slm.exe"
+            if (-not (Test-Path $exePath)) {
+                throw "slm.exe not found in the extracted package - the upstream release layout may have changed."
+            }
+
+            # Register it to start at logon, matching slm.bat's own "startup" command
+            # (schtasks .../rl highest). WinUtil already runs elevated, so - unlike slm.bat,
+            # which re-elevates separately for this - the task can be registered directly.
+            $runCommand = "powershell -NoProfile -WindowStyle Hidden -Command `"Start-Process -WindowStyle Hidden '$exePath'`""
+            & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl highest /f | Out-Null
+
+            Write-WinUtilLog -Component "Package" -Message "Starting $name"
+            Start-Process -WindowStyle Hidden -FilePath $exePath
+
+            Write-WinUtilLog -Component "Package" -Message "$name installed and started - web interface at $($package.webui)"
+        } catch {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install ${name}: $_"
+        } finally {
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -5867,6 +5964,44 @@ Function Uninstall-WinUtilProgramDirect {
     }
 }
 
+Function Uninstall-WinUtilStreamLinkManager {
+    <#
+    .SYNOPSIS
+        Uninstalls Streaming Library Manager.
+
+    .DESCRIPTION
+        No uninstall is documented upstream for slm.bat. Since Install-WinUtilStreamLinkManager
+        owns the entire install location (a fixed folder under LocalAppData, not something the
+        user chose or put other data into), this can safely remove it outright: stop the
+        process, unregister the logon scheduled task, delete the install directory.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Packages
+    )
+
+    $taskName = "Streaming Library Manager"
+
+    foreach ($package in $Packages) {
+        $name = $package.content
+        $installDir = Join-Path $env:LocalAppData "StreamLinkManager"
+
+        Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
+        try {
+            Get-Process -Name "slm" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            & schtasks /delete /tn $taskName /f 2>$null | Out-Null
+
+            if (Test-Path $installDir) {
+                Remove-Item $installDir -Recurse -Force
+            }
+
+            Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+        } catch {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall ${name}: $_"
+        }
+    }
+}
+
 function Update-WinUtilSelections ($flatJson) {
     foreach ($cbkey in $flatJson) {
 
@@ -6992,10 +7127,11 @@ function Invoke-WPFInstall {
         $packagesWslFeature = $packagesSorted['WslFeature']
         $packagesWslDistro = $packagesSorted['WslDistro']
         $packagesWslCommand = $packagesSorted['WslCommand']
-        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count
+        $packagesStreamLinkManager = $packagesSorted['StreamLinkManager']
+        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count)"
+        Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -7049,7 +7185,8 @@ function Invoke-WPFInstall {
                 @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
                 @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
                 @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },
-                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } }
+                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } },
+                @{ Packages = $packagesStreamLinkManager; Label = "Streaming Library Manager"; Installer = { param($pkgs) Install-WinUtilStreamLinkManager -Packages $pkgs } }
             )) {
                 if (@($installBucket.Packages).Count -eq 0) { continue }
 
@@ -8214,6 +8351,7 @@ function Invoke-WPFUnInstall {
         $packagesWinget = $packagesSorted['Winget']
         $packagesChoco = $packagesSorted['Choco']
         $packagesNpm = $packagesSorted['Npm']
+        $packagesStreamLinkManager = $packagesSorted['StreamLinkManager']
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
         # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
@@ -8241,10 +8379,10 @@ function Invoke-WPFUnInstall {
         foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
         foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -8336,6 +8474,22 @@ function Invoke-WPFUnInstall {
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled WSL command packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
+            if ($packagesStreamLinkManager.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Streaming Library Manager ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Uninstall-WinUtilStreamLinkManager -Packages $packagesStreamLinkManager
+                $completedPackages += @($packagesStreamLinkManager).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Streaming Library Manager ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
@@ -8758,6 +8912,16 @@ $sync.configs.applications = @'
     "uninstallCommand": "docker rm -f olivetin-ezstart",
     "foss": false
   },
+  "WPFInstallstreamlinkmanager": {
+    "category": "Channels DVR",
+    "content": "Streaming Library Manager",
+    "description": "Organizes movies, TV shows, and linear stations across streaming platforms for Channels DVR and Infuse, by babsonnexus. Installed natively rather than via the upstream slm.bat installer, which needs an interactive keypress to confirm and has no scripted uninstall - this downloads the same packaged release directly and registers it to start at logon.",
+    "link": "https://github.com/babsonnexus/stream-link-manager-for-channels",
+    "icon": "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/static/assets/img/slm_navicon.png",
+    "webui": "http://localhost:5000",
+    "installType": "streamLinkManager",
+    "foss": true
+  },
   "WPFInstalldvrdesk": {
     "category": "Channels DVR Windows Clients",
     "content": "DVRDesk",
@@ -8829,14 +8993,16 @@ $sync.configs.applications = @'
   "WPFInstallprismcast": {
     "category": "Channels DVR Sources (non-Docker)",
     "content": "Prismcast",
-    "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js.",
+    "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js 22+ and Google Chrome.",
     "link": "https://github.com/hjdhjd/prismcast",
     "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
     "webui": "http://localhost:5589",
     "installType": "npm",
     "npmPackage": "prismcast",
+    "postInstallCommand": "prismcast service install",
     "requires": [
-      "nodejs"
+      "nodejs",
+      "chrome"
     ],
     "foss": true
   }

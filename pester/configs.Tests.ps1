@@ -165,7 +165,7 @@ Describe "Applications config" {
                 }
             }
 
-            $validInstallTypes = @("winget", "choco", "direct", "github", "npm", "wslFeature", "wslDistro", "wslCommand")
+            $validInstallTypes = @("winget", "choco", "direct", "github", "npm", "wslFeature", "wslDistro", "wslCommand", "streamLinkManager")
             if ($entryFields -contains "installType" -and $validInstallTypes -contains [string]$entry.Value.installType) {
                 $hasInstallSource = $true
             }

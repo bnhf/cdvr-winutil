@@ -120,6 +120,16 @@
         "uninstallCommand": "docker rm -f olivetin-ezstart",
         "foss": false
     },
+    "streamlinkmanager": {
+        "category": "Channels DVR",
+        "content": "Streaming Library Manager",
+        "description": "Organizes movies, TV shows, and linear stations across streaming platforms for Channels DVR and Infuse, by babsonnexus. Installed natively rather than via the upstream slm.bat installer, which needs an interactive keypress to confirm and has no scripted uninstall - this downloads the same packaged release directly and registers it to start at logon.",
+        "link": "https://github.com/babsonnexus/stream-link-manager-for-channels",
+        "icon": "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/static/assets/img/slm_navicon.png",
+        "webui": "http://localhost:5000",
+        "installType": "streamLinkManager",
+        "foss": true
+    },
     "dvrdesk": {
         "category": "Channels DVR Windows Clients",
         "content": "DVRDesk",
@@ -191,13 +201,14 @@
     "prismcast": {
         "category": "Channels DVR Sources (non-Docker)",
         "content": "Prismcast",
-        "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js.",
+        "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js 22+ and Google Chrome.",
         "link": "https://github.com/hjdhjd/prismcast",
         "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
         "webui": "http://localhost:5589",
         "installType": "npm",
         "npmPackage": "prismcast",
-        "requires": ["nodejs"],
+        "postInstallCommand": "prismcast service install",
+        "requires": ["nodejs", "chrome"],
         "foss": true
     }
 }

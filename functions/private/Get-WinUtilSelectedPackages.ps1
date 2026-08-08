@@ -22,6 +22,7 @@ function Get-WinUtilSelectedPackages {
     $packagesWslFeature = [System.Collections.ArrayList]::new()
     $packagesWslDistro = [System.Collections.ArrayList]::new()
     $packagesWslCommand = [System.Collections.ArrayList]::new()
+    $packagesStreamLinkManager = [System.Collections.ArrayList]::new()
     $packages = @{
         Winget = $packagesWinget
         Choco = $packagesChoco
@@ -31,6 +32,7 @@ function Get-WinUtilSelectedPackages {
         WslFeature = $packagesWslFeature
         WslDistro = $packagesWslDistro
         WslCommand = $packagesWslCommand
+        StreamLinkManager = $packagesStreamLinkManager
     }
 
     function Add-PackageId {
@@ -61,6 +63,7 @@ function Get-WinUtilSelectedPackages {
                 "wslFeature" { $null = $packagesWslFeature.Add($package) }
                 "wslDistro" { $null = $packagesWslDistro.Add($package) }
                 "wslCommand" { $null = $packagesWslCommand.Add($package) }
+                "streamLinkManager" { $null = $packagesStreamLinkManager.Add($package) }
             }
             continue
         }
