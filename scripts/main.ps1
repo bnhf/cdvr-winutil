@@ -1,25 +1,46 @@
-Write-Host @"
-    CCCCCCCCCCCCCTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
- CCC::::::::::::CT:::::::::::::::::::::TT:::::::::::::::::::::T
-CC:::::::::::::::CT:::::::::::::::::::::TT:::::::::::::::::::::T
-C:::::CCCCCCCC::::CT:::::TT:::::::TT:::::TT:::::TT:::::::TT:::::T
-C:::::C       CCCCCCTTTTTT  T:::::T  TTTTTTTTTTTT  T:::::T  TTTTTT
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C       CCCCCC        T:::::T                T:::::T
-C:::::CCCCCCCC::::C      TT:::::::TT            TT:::::::TT
-CC:::::::::::::::C       T:::::::::T            T:::::::::T
-CCC::::::::::::C         T:::::::::T            T:::::::::T
-  CCCCCCCCCCCCC          TTTTTTTTTTT            TTTTTTTTTTT
+# Console rendering of the Channels logo (getchannels.com/a/images/channels-logo.svg):
+# a white-outlined frame around six vertical color bars (yellow, green, teal, mauve,
+# coral, blue), with a small chevron peak above - reproduced here with Write-Host
+# -ForegroundColor per segment since a plain heredoc can't carry per-character color.
+$channelsLogoBarColors = @('Yellow', 'Green', 'Cyan', 'Magenta', 'Red', 'Blue')
+$channelsLogoBarChar = [char]0x2588 # █
+$channelsLogoBarWidth = 5
+$channelsLogoBarGap = 2
+$channelsLogoLeftPad = 3
+$channelsLogoRightPad = 3
+$channelsLogoLeftMargin = "   "
 
-======CDVR WinUtil========
-=Channels DVR Installer===
-(fork of ChrisTitusTech/winutil)
-"@
+$channelsLogoInnerWidth = ($channelsLogoBarWidth * $channelsLogoBarColors.Count) +
+    ($channelsLogoBarGap * ($channelsLogoBarColors.Count - 1)) +
+    $channelsLogoLeftPad + $channelsLogoRightPad
+$channelsLogoFrameWidth = $channelsLogoInnerWidth + 2
+
+$channelsLogoPeakTop = "/\"
+$channelsLogoPeakBottom = "/  \"
+$channelsLogoPeakTopPad = [math]::Floor(($channelsLogoFrameWidth - $channelsLogoPeakTop.Length) / 2)
+$channelsLogoPeakBottomPad = [math]::Floor(($channelsLogoFrameWidth - $channelsLogoPeakBottom.Length) / 2)
+
+Write-Host ""
+Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakTopPad) + $channelsLogoPeakTop) -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakBottomPad) + $channelsLogoPeakBottom) -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
+for ($row = 0; $row -lt 5; $row++) {
+    Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoLeftPad)) -NoNewline -ForegroundColor White
+    for ($i = 0; $i -lt $channelsLogoBarColors.Count; $i++) {
+        Write-Host ([string]$channelsLogoBarChar * $channelsLogoBarWidth) -NoNewline -ForegroundColor $channelsLogoBarColors[$i]
+        if ($i -lt $channelsLogoBarColors.Count - 1) { Write-Host (" " * $channelsLogoBarGap) -NoNewline }
+    }
+    Write-Host ((" " * $channelsLogoRightPad) + "|") -ForegroundColor White
+}
+Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
+Write-Host ""
+Write-Host "======CDVR WinUtil========"
+Write-Host "=Channels DVR Installer==="
+Write-Host "(fork of ChrisTitusTech/winutil)"
+
+Remove-Variable -Name channelsLogo* -ErrorAction SilentlyContinue
 
 # Load the configuration files
 

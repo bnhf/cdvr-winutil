@@ -73,14 +73,29 @@ function Initialize-InstallAppEntry {
         $fallback = New-Object Windows.Controls.TextBlock
         $fallback.Text = $app.content.TrimStart(".").Substring(0, 1).ToUpper()
         $fallback.FontWeight = "Bold"; $fallback.HorizontalAlignment = "Center"; $fallback.VerticalAlignment = "Center"
-        if ($app.link) { $fallback.Visibility = "Collapsed" }
+        # Prefer an explicit per-app icon (config/applications.json "icon") over guessing one
+        # from the site favicon - the favicon guess only ever finds generic hosting-domain
+        # icons (e.g. the GitHub octocat) for the many entries whose "link" points at a repo
+        # rather than a dedicated project site.
+        $iconUrl = if ($app.icon) { $app.icon } elseif ($app.link) { "https://www.google.com/s2/favicons?sz=64&domain_url=$([uri]::EscapeDataString($app.link))" }
+        if ($iconUrl) { $fallback.Visibility = "Collapsed" }
         $fallback.SetResourceReference([Windows.Controls.TextBlock]::FontSizeProperty, "AppEntryFontSize")
         $fallback.SetResourceReference([Windows.Controls.TextBlock]::ForegroundProperty, "ToggleButtonOnColor")
         [void]$icon.Children.Add($fallback)
-        if ($app.link) {
+        if ($iconUrl) {
             $logo = New-Object Windows.Controls.Image
             $logo.Stretch = [Windows.Media.Stretch]::Uniform
-            $logo.Source = "https://www.google.com/s2/favicons?sz=64&domain_url=$([uri]::EscapeDataString($app.link))"
+            $bitmap = New-Object Windows.Media.Imaging.BitmapImage
+            $bitmap.BeginInit()
+            $bitmap.UriSource = New-Object Uri($iconUrl)
+            # Fix the decode size instead of loading at native resolution - keeps this cheap,
+            # and for the multi-resolution .ico icons (Feral HTPC, Pluto for Channels, Android
+            # ADB Bridge) it tells WPF's icon decoder which embedded frame to pick rather than
+            # leaving that to chance.
+            $bitmap.DecodePixelWidth = 64
+            $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            $bitmap.EndInit()
+            $logo.Source = $bitmap
             $logo.Add_ImageFailed({ $this.Visibility = "Collapsed"; $this.Parent.Children[0].Visibility = "Visible" })
             [void]$icon.Children.Add($logo)
         }

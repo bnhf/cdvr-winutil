@@ -946,14 +946,29 @@ function Initialize-InstallAppEntry {
         $fallback = New-Object Windows.Controls.TextBlock
         $fallback.Text = $app.content.TrimStart(".").Substring(0, 1).ToUpper()
         $fallback.FontWeight = "Bold"; $fallback.HorizontalAlignment = "Center"; $fallback.VerticalAlignment = "Center"
-        if ($app.link) { $fallback.Visibility = "Collapsed" }
+        # Prefer an explicit per-app icon (config/applications.json "icon") over guessing one
+        # from the site favicon - the favicon guess only ever finds generic hosting-domain
+        # icons (e.g. the GitHub octocat) for the many entries whose "link" points at a repo
+        # rather than a dedicated project site.
+        $iconUrl = if ($app.icon) { $app.icon } elseif ($app.link) { "https://www.google.com/s2/favicons?sz=64&domain_url=$([uri]::EscapeDataString($app.link))" }
+        if ($iconUrl) { $fallback.Visibility = "Collapsed" }
         $fallback.SetResourceReference([Windows.Controls.TextBlock]::FontSizeProperty, "AppEntryFontSize")
         $fallback.SetResourceReference([Windows.Controls.TextBlock]::ForegroundProperty, "ToggleButtonOnColor")
         [void]$icon.Children.Add($fallback)
-        if ($app.link) {
+        if ($iconUrl) {
             $logo = New-Object Windows.Controls.Image
             $logo.Stretch = [Windows.Media.Stretch]::Uniform
-            $logo.Source = "https://www.google.com/s2/favicons?sz=64&domain_url=$([uri]::EscapeDataString($app.link))"
+            $bitmap = New-Object Windows.Media.Imaging.BitmapImage
+            $bitmap.BeginInit()
+            $bitmap.UriSource = New-Object Uri($iconUrl)
+            # Fix the decode size instead of loading at native resolution - keeps this cheap,
+            # and for the multi-resolution .ico icons (Feral HTPC, Pluto for Channels, Android
+            # ADB Bridge) it tells WPF's icon decoder which embedded frame to pick rather than
+            # leaving that to chance.
+            $bitmap.DecodePixelWidth = 64
+            $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            $bitmap.EndInit()
+            $logo.Source = $bitmap
             $logo.Add_ImageFailed({ $this.Visibility = "Collapsed"; $this.Parent.Children[0].Visibility = "Visible" })
             [void]$icon.Children.Add($logo)
         }
@@ -8556,6 +8571,7 @@ $sync.configs.applications = @'
     "content": "Channels DVR",
     "description": "Channels DVR Server - the core DVR backend service. Installer is interactive - no silent-install flag is documented. To uninstall: stop the DVR engine, then re-run the installer and choose Uninstall.",
     "link": "https://getchannels.com/dvr-server/",
+    "icon": "https://getchannels.com/favicon.ico",
     "installType": "direct",
     "url": "https://channels-dvr.s3.amazonaws.com/SetupChannelsDVR.exe",
     "args": "",
@@ -8567,6 +8583,7 @@ $sync.configs.applications = @'
     "content": "Olivetin (EZ-Start)",
     "description": "Olivetin for Channels, run via docker inside the Debian WSL distro. Requires Docker Desktop with WSL integration enabled for Debian.",
     "link": "https://github.com/bnhf/olivetin-for-channels",
+    "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
     "installType": "wslCommand",
     "distro": "Debian",
     "requires": [
@@ -8591,6 +8608,7 @@ $sync.configs.applications = @'
     "content": "DVRDesk",
     "description": "Desktop client for Channels DVR by jay3702.",
     "link": "https://github.com/jay3702/DVRDesk",
+    "icon": "https://raw.githubusercontent.com/jay3702/DVRDesk/main/src-tauri/icons/icon.png",
     "installType": "github",
     "repo": "jay3702/DVRDesk",
     "assetPattern": "*_x64-setup.exe",
@@ -8601,6 +8619,7 @@ $sync.configs.applications = @'
     "content": "Feral HTPC",
     "description": "Feral HTPC front-end for Channels DVR by nuken.",
     "link": "https://github.com/nuken/Feral-HTPC",
+    "icon": "https://raw.githubusercontent.com/nuken/Feral-HTPC/main/Assets/appicon.ico",
     "installType": "github",
     "repo": "nuken/Feral-HTPC",
     "assetPattern": "*Setup.exe",
@@ -8611,6 +8630,7 @@ $sync.configs.applications = @'
     "content": "Nucleus HTPC",
     "description": "HTPC front-end for Channels DVR by nuken.",
     "link": "https://github.com/nuken/HTPC",
+    "icon": "https://raw.githubusercontent.com/nuken/HTPC/main/Assets/Nucleus.png",
     "installType": "github",
     "repo": "nuken/HTPC",
     "assetPattern": "NucleusHTPC_Installer_*.exe",
@@ -8621,6 +8641,7 @@ $sync.configs.applications = @'
     "content": "RustDVR",
     "description": "Native Win32 client for Channels DVR written in Rust with WinUI3 styling, by mackid1993. Not affiliated or endorsed by Fancy Bits LLC. Early release (v0.0.1).",
     "link": "https://github.com/mackid1993/RustDVR",
+    "icon": "https://git-scm.com/images/logos/downloads/Git-Icon-1788C.png",
     "installType": "github",
     "repo": "mackid1993/RustDVR",
     "assetPattern": "RustDVR-Setup-*.exe",
@@ -8631,6 +8652,7 @@ $sync.configs.applications = @'
     "content": "Pluto for Channels",
     "description": "Pluto TV integration for Channels DVR by nuken.",
     "link": "https://github.com/nuken/Pluto-Windows_4C",
+    "icon": "https://raw.githubusercontent.com/nuken/Pluto-Windows_4C/main/icon.ico",
     "installType": "github",
     "repo": "nuken/Pluto-Windows_4C",
     "assetPattern": "PlutoForChannels*.exe",
@@ -8641,6 +8663,7 @@ $sync.configs.applications = @'
     "content": "Android ADB Bridge",
     "description": "Android ADB bridge tool for Channels DVR by nuken.",
     "link": "https://github.com/nuken/Android-ADB-Bridge",
+    "icon": "https://raw.githubusercontent.com/nuken/Android-ADB-Bridge/main/icon.ico",
     "installType": "github",
     "repo": "nuken/Android-ADB-Bridge",
     "assetPattern": "AndroidBridge_Setup_*.exe",
@@ -8651,6 +8674,7 @@ $sync.configs.applications = @'
     "content": "Prismcast",
     "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js.",
     "link": "https://github.com/hjdhjd/prismcast",
+    "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
     "installType": "npm",
     "npmPackage": "prismcast",
     "requires": [
@@ -13139,28 +13163,49 @@ $scripts = @(
 </unattend>
 
 '@
-Write-Host @"
-    CCCCCCCCCCCCCTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
- CCC::::::::::::CT:::::::::::::::::::::TT:::::::::::::::::::::T
-CC:::::::::::::::CT:::::::::::::::::::::TT:::::::::::::::::::::T
-C:::::CCCCCCCC::::CT:::::TT:::::::TT:::::TT:::::TT:::::::TT:::::T
-C:::::C       CCCCCCTTTTTT  T:::::T  TTTTTTTTTTTT  T:::::T  TTTTTT
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C                     T:::::T                T:::::T
-C:::::C       CCCCCC        T:::::T                T:::::T
-C:::::CCCCCCCC::::C      TT:::::::TT            TT:::::::TT
-CC:::::::::::::::C       T:::::::::T            T:::::::::T
-CCC::::::::::::C         T:::::::::T            T:::::::::T
-  CCCCCCCCCCCCC          TTTTTTTTTTT            TTTTTTTTTTT
+# Console rendering of the Channels logo (getchannels.com/a/images/channels-logo.svg):
+# a white-outlined frame around six vertical color bars (yellow, green, teal, mauve,
+# coral, blue), with a small chevron peak above - reproduced here with Write-Host
+# -ForegroundColor per segment since a plain heredoc can't carry per-character color.
+$channelsLogoBarColors = @('Yellow', 'Green', 'Cyan', 'Magenta', 'Red', 'Blue')
+$channelsLogoBarChar = [char]0x2588 # █
+$channelsLogoBarWidth = 5
+$channelsLogoBarGap = 2
+$channelsLogoLeftPad = 3
+$channelsLogoRightPad = 3
+$channelsLogoLeftMargin = "   "
 
-======CDVR WinUtil========
-=Channels DVR Installer===
-(fork of ChrisTitusTech/winutil)
-"@
+$channelsLogoInnerWidth = ($channelsLogoBarWidth * $channelsLogoBarColors.Count) +
+    ($channelsLogoBarGap * ($channelsLogoBarColors.Count - 1)) +
+    $channelsLogoLeftPad + $channelsLogoRightPad
+$channelsLogoFrameWidth = $channelsLogoInnerWidth + 2
+
+$channelsLogoPeakTop = "/\"
+$channelsLogoPeakBottom = "/  \"
+$channelsLogoPeakTopPad = [math]::Floor(($channelsLogoFrameWidth - $channelsLogoPeakTop.Length) / 2)
+$channelsLogoPeakBottomPad = [math]::Floor(($channelsLogoFrameWidth - $channelsLogoPeakBottom.Length) / 2)
+
+Write-Host ""
+Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakTopPad) + $channelsLogoPeakTop) -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakBottomPad) + $channelsLogoPeakBottom) -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
+for ($row = 0; $row -lt 5; $row++) {
+    Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoLeftPad)) -NoNewline -ForegroundColor White
+    for ($i = 0; $i -lt $channelsLogoBarColors.Count; $i++) {
+        Write-Host ([string]$channelsLogoBarChar * $channelsLogoBarWidth) -NoNewline -ForegroundColor $channelsLogoBarColors[$i]
+        if ($i -lt $channelsLogoBarColors.Count - 1) { Write-Host (" " * $channelsLogoBarGap) -NoNewline }
+    }
+    Write-Host ((" " * $channelsLogoRightPad) + "|") -ForegroundColor White
+}
+Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
+Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
+Write-Host ""
+Write-Host "======CDVR WinUtil========"
+Write-Host "=Channels DVR Installer==="
+Write-Host "(fork of ChrisTitusTech/winutil)"
+
+Remove-Variable -Name channelsLogo* -ErrorAction SilentlyContinue
 
 # Load the configuration files
 
