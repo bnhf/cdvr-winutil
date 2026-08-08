@@ -1,4 +1,13 @@
 {
+    "windowsterminal": {
+        "category": "Foundational",
+        "choco": "microsoft-windows-terminal",
+        "content": "Windows Terminal",
+        "description": "Modern terminal application for command-line shells like PowerShell and WSL, with tabs and profiles.",
+        "link": "https://aka.ms/terminal",
+        "winget": "Microsoft.WindowsTerminal",
+        "foss": true
+    },
     "dockerdesktop": {
         "category": "Foundational",
         "choco": "docker-desktop",
@@ -86,6 +95,7 @@
         "description": "Channels DVR Server - the core DVR backend service. Installer is interactive - no silent-install flag is documented. To uninstall: stop the DVR engine, then re-run the installer and choose Uninstall.",
         "link": "https://getchannels.com/dvr-server/",
         "icon": "https://getchannels.com/favicon.ico",
+        "webui": "http://localhost:8089",
         "installType": "direct",
         "url": "https://channels-dvr.s3.amazonaws.com/SetupChannelsDVR.exe",
         "args": "",
@@ -95,9 +105,11 @@
     "olivetin": {
         "category": "Channels DVR",
         "content": "Olivetin (EZ-Start)",
+        "subtitle": "Includes Portainer",
         "description": "Olivetin for Channels, run via docker inside the Debian WSL distro. Requires Docker Desktop with WSL integration enabled for Debian.",
-        "link": "https://github.com/bnhf/olivetin-for-channels",
+        "link": "https://github.com/bnhf/OliveTin",
         "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
+        "webui": "http://localhost:1338",
         "installType": "wslCommand",
         "distro": "Debian",
         "requires": ["wsl2", "debian", "dockerdesktop"],
@@ -158,6 +170,7 @@
         "description": "Pluto TV integration for Channels DVR by nuken.",
         "link": "https://github.com/nuken/Pluto-Windows_4C",
         "icon": "https://raw.githubusercontent.com/nuken/Pluto-Windows_4C/main/icon.ico",
+        "webui": "http://localhost:7777",
         "installType": "github",
         "repo": "nuken/Pluto-Windows_4C",
         "assetPattern": "PlutoForChannels*.exe",
@@ -169,6 +182,7 @@
         "description": "Android ADB bridge tool for Channels DVR by nuken.",
         "link": "https://github.com/nuken/Android-ADB-Bridge",
         "icon": "https://raw.githubusercontent.com/nuken/Android-ADB-Bridge/main/icon.ico",
+        "webui": "http://localhost:8888/status",
         "installType": "github",
         "repo": "nuken/Android-ADB-Bridge",
         "assetPattern": "AndroidBridge_Setup_*.exe",
@@ -180,6 +194,7 @@
         "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js.",
         "link": "https://github.com/hjdhjd/prismcast",
         "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
+        "webui": "http://localhost:5589",
         "installType": "npm",
         "npmPackage": "prismcast",
         "requires": ["nodejs"],

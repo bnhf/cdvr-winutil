@@ -8,6 +8,7 @@ BeforeAll {
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
     . (Join-Path $script:repoRoot "functions\private\Invoke-WinUtilCurrentSystem.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilProgramInstalled.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Find-WinUtilAppLaunchTarget.ps1")
     . (Join-Path $script:repoRoot "functions\private\Set-WinUtilRegistry.ps1")
     . (Join-Path $script:repoRoot "functions\private\Set-WinUtilService.ps1")
 
@@ -138,6 +139,39 @@ Describe "Invoke-WinUtilCurrentSystem WSL detection" {
 
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
         $result | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Find-WinUtilAppLaunchTarget" {
+    BeforeEach {
+        Mock Get-StartApps {
+            @(
+                [pscustomobject]@{ Name = "Google Chrome"; AppID = "Chrome" }
+                [pscustomobject]@{ Name = "Chrome Remote Desktop"; AppID = "Chrome._crx_cmkncekebbplodngbpllndjkfo" }
+                [pscustomobject]@{ Name = "Firefox"; AppID = "org.mozilla.firefox" }
+                [pscustomobject]@{ Name = "Firefox Private Browsing"; AppID = "308046B0AF4A39CB;PrivateBrowsingAUMID" }
+                [pscustomobject]@{ Name = "Terminal"; AppID = "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App" }
+            )
+        }
+    }
+
+    It "prefers an exact name match over a longer substring match" {
+        Find-WinUtilAppLaunchTarget -AppName "Firefox" | Should -Be "shell:AppsFolder\org.mozilla.firefox"
+    }
+
+    It "picks the closest-length substring match when there is no exact match" {
+        # "Chrome" substring-matches both "Google Chrome" and the unrelated "Chrome Remote
+        # Desktop" - the closest-length entry ("Google Chrome") should win, not whichever
+        # Get-StartApps happens to enumerate first.
+        Find-WinUtilAppLaunchTarget -AppName "Chrome" | Should -Be "shell:AppsFolder\Chrome"
+    }
+
+    It "matches an MSIX-packaged app that has no classic shortcut" {
+        Find-WinUtilAppLaunchTarget -AppName "Windows Terminal" | Should -Be "shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+    }
+
+    It "returns null when nothing matches" {
+        Find-WinUtilAppLaunchTarget -AppName "Totally Fictional App" | Should -BeNullOrEmpty
     }
 }
 

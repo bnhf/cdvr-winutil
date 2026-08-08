@@ -2,18 +2,27 @@
 # a white-outlined frame around six vertical color bars (yellow, green, teal, mauve,
 # coral, blue), with a small chevron peak above - reproduced here with Write-Host
 # -ForegroundColor per segment since a plain heredoc can't carry per-character color.
+#
+# Sized so the frame itself (border to border) reads as a 16:9 TV rectangle once rendered,
+# not just in character-cell counts: a monospace terminal cell is roughly twice as tall as
+# it is wide (~0.5 width:height), so matching a 16:9 on-screen ratio needs about 3.56 text
+# columns per text row ((16/9) / 0.5), not 1:1 - hence far more columns than rows below.
 $channelsLogoBarColors = @('Yellow', 'Green', 'Cyan', 'Magenta', 'Red', 'Blue')
 $channelsLogoBarChar = [char]0x2588 # █
-$channelsLogoBarWidth = 5
-$channelsLogoBarGap = 2
-$channelsLogoLeftPad = 3
-$channelsLogoRightPad = 3
+$channelsLogoBarWidth = 4
+$channelsLogoBarGap = 1
+$channelsLogoLeftPad = 2
+$channelsLogoRightPad = 2
 $channelsLogoLeftMargin = "   "
+$channelsLogoCharAspect = 0.5 # typical monospace terminal cell width:height
 
 $channelsLogoInnerWidth = ($channelsLogoBarWidth * $channelsLogoBarColors.Count) +
     ($channelsLogoBarGap * ($channelsLogoBarColors.Count - 1)) +
     $channelsLogoLeftPad + $channelsLogoRightPad
 $channelsLogoFrameWidth = $channelsLogoInnerWidth + 2
+
+$channelsLogoTargetFrameRows = [math]::Round($channelsLogoFrameWidth / ((16 / 9) / $channelsLogoCharAspect))
+$channelsLogoBarRows = [math]::Max(1, $channelsLogoTargetFrameRows - 4) # - 2 border rows, - 2 blank padding rows
 
 $channelsLogoPeakTop = "/\"
 $channelsLogoPeakBottom = "/  \"
@@ -25,7 +34,7 @@ Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakTopPad) + $channel
 Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakBottomPad) + $channelsLogoPeakBottom) -ForegroundColor White
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
 Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
-for ($row = 0; $row -lt 5; $row++) {
+for ($row = 0; $row -lt $channelsLogoBarRows; $row++) {
     Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoLeftPad)) -NoNewline -ForegroundColor White
     for ($i = 0; $i -lt $channelsLogoBarColors.Count; $i++) {
         Write-Host ([string]$channelsLogoBarChar * $channelsLogoBarWidth) -NoNewline -ForegroundColor $channelsLogoBarColors[$i]

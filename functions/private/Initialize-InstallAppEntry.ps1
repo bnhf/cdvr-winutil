@@ -101,11 +101,26 @@ function Initialize-InstallAppEntry {
         }
         [void]$contentPanel.Children.Add($icon)
 
-        # Create the TextBlock for the application name
+        # Create the TextBlock for the application name, plus an optional subtitle line
+        # (config/applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
+        # underneath it in an accent color - only takes up space when an entry actually sets one.
+        $nameStack = New-Object Windows.Controls.StackPanel
+        $nameStack.Orientation = "Vertical"
+        $nameStack.VerticalAlignment = [Windows.VerticalAlignment]::Center
+
         $appName = New-Object Windows.Controls.TextBlock
         $appName.Style = $sync.Form.Resources.AppEntryNameStyle
         $appName.Text = $app.content
-        [void]$contentPanel.Children.Add($appName)
+        [void]$nameStack.Children.Add($appName)
+
+        if ($app.subtitle) {
+            $appSubtitle = New-Object Windows.Controls.TextBlock
+            $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
+            $appSubtitle.Text = $app.subtitle
+            [void]$nameStack.Children.Add($appSubtitle)
+        }
+
+        [void]$contentPanel.Children.Add($nameStack)
         $checkBox.Content = $contentPanel
 
         # Add accessibility properties to make the elements screen reader friendly

@@ -35,6 +35,7 @@ function Invoke-WinUtilFontScaling {
         "SettingsIconFontSize",
         "CloseIconFontSize",
         "AppEntryFontSize",
+        "AppEntrySubtitleFontSize",
         "SearchBarTextBoxFontSize",
         "SearchBarClearButtonFontSize",
         "CustomDialogFontSize",

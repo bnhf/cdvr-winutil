@@ -614,6 +614,74 @@ function Find-TweaksByNameOrDescription {
     }
 }
 
+function Find-WinUtilAppLaunchTarget {
+    <#
+    .SYNOPSIS
+        Finds a Start Menu entry matching an app's display name, for launching apps whose
+        install location isn't otherwise known.
+
+    .DESCRIPTION
+        Community-distributed installers (installType "github") run interactively so the
+        user can pick options/location themselves, and winget/choco don't hand back an
+        install path either - so this is the only generic way to relaunch an already-
+        installed app without hardcoding a path per package.
+
+        Uses Get-StartApps rather than scanning the Programs folder for .lnk files directly,
+        since it's the one enumeration that uniformly covers both classic (.lnk-based) and
+        MSIX/Store-packaged apps (which have no .lnk file at all - e.g. Windows Terminal only
+        shows up here, via its AppID).
+
+        Tries an exact (normalized) name match first, only falling back to a loose bidirectional
+        substring match if nothing exact is found - a plain substring match alone is unreliable
+        (e.g. app name "Firefox" would arbitrarily match either "Firefox" or the unrelated
+        "Firefox Private Browsing" entry depending on enumeration order).
+
+    .OUTPUTS
+        A "shell:AppsFolder\<AppID>" path Start-Process can launch directly, or $null if no
+        matching Start Menu entry was found.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppName
+    )
+
+    function Get-NormalizedName([string]$Name) {
+        $Name -replace '[^a-zA-Z0-9]', ''
+    }
+
+    $normalizedAppName = Get-NormalizedName $AppName
+    if ([string]::IsNullOrWhiteSpace($normalizedAppName)) {
+        return $null
+    }
+
+    $candidates = Get-StartApps | Where-Object { $_.AppID } | ForEach-Object {
+        [pscustomobject]@{
+            AppID = $_.AppID
+            NormalizedName = Get-NormalizedName $_.Name
+        }
+    }
+
+    $exactMatch = $candidates | Where-Object { $_.NormalizedName -eq $normalizedAppName } | Select-Object -First 1
+    if ($exactMatch) {
+        return "shell:AppsFolder\$($exactMatch.AppID)"
+    }
+
+    # Break ties by closest name length to the target instead of just taking the first match -
+    # a plain "first substring match wins" would arbitrarily prefer whichever entry happens to
+    # enumerate first (e.g. app name "Chrome" matching unrelated "Chrome Remote Desktop" ahead
+    # of the actual "Google Chrome" entry, since both contain "Chrome").
+    $looseMatch = $candidates | Where-Object {
+        $_.NormalizedName -and (
+            $_.NormalizedName -like "*$normalizedAppName*" -or $normalizedAppName -like "*$($_.NormalizedName)*"
+        )
+    } | Sort-Object { [Math]::Abs($_.NormalizedName.Length - $normalizedAppName.Length) } | Select-Object -First 1
+    if ($looseMatch) {
+        return "shell:AppsFolder\$($looseMatch.AppID)"
+    }
+
+    return $null
+}
+
 function Get-WinUtilInstalledAPPX {
     <#
 
@@ -974,11 +1042,26 @@ function Initialize-InstallAppEntry {
         }
         [void]$contentPanel.Children.Add($icon)
 
-        # Create the TextBlock for the application name
+        # Create the TextBlock for the application name, plus an optional subtitle line
+        # (config/applications.json "subtitle", e.g. Olivetin's "Includes Portainer") stacked
+        # underneath it in an accent color - only takes up space when an entry actually sets one.
+        $nameStack = New-Object Windows.Controls.StackPanel
+        $nameStack.Orientation = "Vertical"
+        $nameStack.VerticalAlignment = [Windows.VerticalAlignment]::Center
+
         $appName = New-Object Windows.Controls.TextBlock
         $appName.Style = $sync.Form.Resources.AppEntryNameStyle
         $appName.Text = $app.content
-        [void]$contentPanel.Children.Add($appName)
+        [void]$nameStack.Children.Add($appName)
+
+        if ($app.subtitle) {
+            $appSubtitle = New-Object Windows.Controls.TextBlock
+            $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
+            $appSubtitle.Text = $app.subtitle
+            [void]$nameStack.Children.Add($appSubtitle)
+        }
+
+        [void]$contentPanel.Children.Add($nameStack)
         $checkBox.Content = $contentPanel
 
         # Add accessibility properties to make the elements screen reader friendly
@@ -2157,6 +2240,7 @@ function Invoke-WinUtilFontScaling {
         "SettingsIconFontSize",
         "CloseIconFontSize",
         "AppEntryFontSize",
+        "AppEntrySubtitleFontSize",
         "SearchBarTextBoxFontSize",
         "SearchBarClearButtonFontSize",
         "CustomDialogFontSize",
@@ -5947,7 +6031,8 @@ function Initialize-WPFUI {
             $appButtons = @(
             [PSCustomObject]@{ Name = "Install";    Icon = [char]0xE118 },
             [PSCustomObject]@{ Name = "Uninstall";  Icon = [char]0xE74D },
-            [PSCustomObject]@{ Name = "Info";       Icon = [char]0xE946 }
+            [PSCustomObject]@{ Name = "Info";       Icon = [char]0xE946 },
+            [PSCustomObject]@{ Name = "Open";       Icon = [char]0xE8A7 }
             )
             foreach ($button in $appButtons) {
                 $newButton = New-Object Windows.Controls.Button
@@ -5985,6 +6070,32 @@ function Initialize-WPFUI {
                         $newButton.Add_Click({
                             $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
                             Start-Process $appObject.link
+                        })
+                    }
+                    "Open" {
+                        # Prefer a known local web interface (config/applications.json "webui")
+                        # over guessing - only set for apps with a fixed, documented port. For
+                        # everything else, fall back to searching the Start Menu for a matching
+                        # shortcut, since community installers run interactively (the user picks
+                        # the install location) and winget/choco don't hand back an install path.
+                        $newButton.Add_MouseEnter({
+                            $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
+                            if ($appObject.webui) {
+                                $this.Tag = $appObject.webui
+                                $this.ToolTip = "Open web interface`n$($appObject.webui)"
+                            } else {
+                                $this.Tag = Find-WinUtilAppLaunchTarget -AppName $appObject.content
+                                $this.ToolTip = if ($this.Tag) {
+                                    "Launch $($appObject.content)"
+                                } else {
+                                    "Couldn't find a web interface or installed shortcut for $($appObject.content)"
+                                }
+                            }
+                        })
+                        $newButton.Add_Click({
+                            if ($this.Tag) {
+                                Start-Process $this.Tag
+                            }
                         })
                     }
                 }
@@ -8515,6 +8626,15 @@ function Invoke-WPFUpdatessecurity {
 
 $sync.configs.applications = @'
 {
+  "WPFInstallwindowsterminal": {
+    "category": "Foundational",
+    "choco": "microsoft-windows-terminal",
+    "content": "Windows Terminal",
+    "description": "Modern terminal application for command-line shells like PowerShell and WSL, with tabs and profiles.",
+    "link": "https://aka.ms/terminal",
+    "winget": "Microsoft.WindowsTerminal",
+    "foss": true
+  },
   "WPFInstalldockerdesktop": {
     "category": "Foundational",
     "choco": "docker-desktop",
@@ -8604,6 +8724,7 @@ $sync.configs.applications = @'
     "description": "Channels DVR Server - the core DVR backend service. Installer is interactive - no silent-install flag is documented. To uninstall: stop the DVR engine, then re-run the installer and choose Uninstall.",
     "link": "https://getchannels.com/dvr-server/",
     "icon": "https://getchannels.com/favicon.ico",
+    "webui": "http://localhost:8089",
     "installType": "direct",
     "url": "https://channels-dvr.s3.amazonaws.com/SetupChannelsDVR.exe",
     "args": "",
@@ -8613,9 +8734,11 @@ $sync.configs.applications = @'
   "WPFInstallolivetin": {
     "category": "Channels DVR",
     "content": "Olivetin (EZ-Start)",
+    "subtitle": "Includes Portainer",
     "description": "Olivetin for Channels, run via docker inside the Debian WSL distro. Requires Docker Desktop with WSL integration enabled for Debian.",
-    "link": "https://github.com/bnhf/olivetin-for-channels",
+    "link": "https://github.com/bnhf/OliveTin",
     "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
+    "webui": "http://localhost:1338",
     "installType": "wslCommand",
     "distro": "Debian",
     "requires": [
@@ -8685,6 +8808,7 @@ $sync.configs.applications = @'
     "description": "Pluto TV integration for Channels DVR by nuken.",
     "link": "https://github.com/nuken/Pluto-Windows_4C",
     "icon": "https://raw.githubusercontent.com/nuken/Pluto-Windows_4C/main/icon.ico",
+    "webui": "http://localhost:7777",
     "installType": "github",
     "repo": "nuken/Pluto-Windows_4C",
     "assetPattern": "PlutoForChannels*.exe",
@@ -8696,6 +8820,7 @@ $sync.configs.applications = @'
     "description": "Android ADB bridge tool for Channels DVR by nuken.",
     "link": "https://github.com/nuken/Android-ADB-Bridge",
     "icon": "https://raw.githubusercontent.com/nuken/Android-ADB-Bridge/main/icon.ico",
+    "webui": "http://localhost:8888/status",
     "installType": "github",
     "repo": "nuken/Android-ADB-Bridge",
     "assetPattern": "AndroidBridge_Setup_*.exe",
@@ -8707,6 +8832,7 @@ $sync.configs.applications = @'
     "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js.",
     "link": "https://github.com/hjdhjd/prismcast",
     "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
+    "webui": "http://localhost:5589",
     "installType": "npm",
     "npmPackage": "prismcast",
     "requires": [
@@ -9553,6 +9679,7 @@ $sync.configs.themes = @'
   "shared": {
     "AppEntryWidth": "220",
     "AppEntryFontSize": "13.2",
+    "AppEntrySubtitleFontSize": "10.5",
     "AppEntryIconSize": "28",
     "AppEntryMargin": "3",
     "AppEntryBorderThickness": "1",
@@ -11460,6 +11587,13 @@ $inputXML = @'
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
     </Style>
+    <Style x:Key="AppEntrySubtitleStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{DynamicResource AppEntrySubtitleFontSize}"/>
+        <Setter Property="FontWeight" Value="Normal"/>
+        <Setter Property="Foreground" Value="{DynamicResource ToggleButtonOnColor}"/>
+        <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
+        <Setter Property="Background" Value="Transparent"/>
+    </Style>
     <Style x:Key="AppEntryButtonStyle" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource IconButtonSize}"/>
         <Setter Property="Height" Value="{DynamicResource IconButtonSize}"/>
@@ -13199,18 +13333,27 @@ $scripts = @(
 # a white-outlined frame around six vertical color bars (yellow, green, teal, mauve,
 # coral, blue), with a small chevron peak above - reproduced here with Write-Host
 # -ForegroundColor per segment since a plain heredoc can't carry per-character color.
+#
+# Sized so the frame itself (border to border) reads as a 16:9 TV rectangle once rendered,
+# not just in character-cell counts: a monospace terminal cell is roughly twice as tall as
+# it is wide (~0.5 width:height), so matching a 16:9 on-screen ratio needs about 3.56 text
+# columns per text row ((16/9) / 0.5), not 1:1 - hence far more columns than rows below.
 $channelsLogoBarColors = @('Yellow', 'Green', 'Cyan', 'Magenta', 'Red', 'Blue')
 $channelsLogoBarChar = [char]0x2588 # █
-$channelsLogoBarWidth = 5
-$channelsLogoBarGap = 2
-$channelsLogoLeftPad = 3
-$channelsLogoRightPad = 3
+$channelsLogoBarWidth = 4
+$channelsLogoBarGap = 1
+$channelsLogoLeftPad = 2
+$channelsLogoRightPad = 2
 $channelsLogoLeftMargin = "   "
+$channelsLogoCharAspect = 0.5 # typical monospace terminal cell width:height
 
 $channelsLogoInnerWidth = ($channelsLogoBarWidth * $channelsLogoBarColors.Count) +
     ($channelsLogoBarGap * ($channelsLogoBarColors.Count - 1)) +
     $channelsLogoLeftPad + $channelsLogoRightPad
 $channelsLogoFrameWidth = $channelsLogoInnerWidth + 2
+
+$channelsLogoTargetFrameRows = [math]::Round($channelsLogoFrameWidth / ((16 / 9) / $channelsLogoCharAspect))
+$channelsLogoBarRows = [math]::Max(1, $channelsLogoTargetFrameRows - 4) # - 2 border rows, - 2 blank padding rows
 
 $channelsLogoPeakTop = "/\"
 $channelsLogoPeakBottom = "/  \"
@@ -13222,7 +13365,7 @@ Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakTopPad) + $channel
 Write-Host ($channelsLogoLeftMargin + (" " * $channelsLogoPeakBottomPad) + $channelsLogoPeakBottom) -ForegroundColor White
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
 Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
-for ($row = 0; $row -lt 5; $row++) {
+for ($row = 0; $row -lt $channelsLogoBarRows; $row++) {
     Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoLeftPad)) -NoNewline -ForegroundColor White
     for ($i = 0; $i -lt $channelsLogoBarColors.Count; $i++) {
         Write-Host ([string]$channelsLogoBarChar * $channelsLogoBarWidth) -NoNewline -ForegroundColor $channelsLogoBarColors[$i]

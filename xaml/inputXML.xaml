@@ -115,6 +115,13 @@
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
     </Style>
+    <Style x:Key="AppEntrySubtitleStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{DynamicResource AppEntrySubtitleFontSize}"/>
+        <Setter Property="FontWeight" Value="Normal"/>
+        <Setter Property="Foreground" Value="{DynamicResource ToggleButtonOnColor}"/>
+        <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
+        <Setter Property="Background" Value="Transparent"/>
+    </Style>
     <Style x:Key="AppEntryButtonStyle" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource IconButtonSize}"/>
         <Setter Property="Height" Value="{DynamicResource IconButtonSize}"/>

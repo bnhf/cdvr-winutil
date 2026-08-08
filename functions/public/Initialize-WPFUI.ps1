@@ -65,7 +65,8 @@ function Initialize-WPFUI {
             $appButtons = @(
             [PSCustomObject]@{ Name = "Install";    Icon = [char]0xE118 },
             [PSCustomObject]@{ Name = "Uninstall";  Icon = [char]0xE74D },
-            [PSCustomObject]@{ Name = "Info";       Icon = [char]0xE946 }
+            [PSCustomObject]@{ Name = "Info";       Icon = [char]0xE946 },
+            [PSCustomObject]@{ Name = "Open";       Icon = [char]0xE8A7 }
             )
             foreach ($button in $appButtons) {
                 $newButton = New-Object Windows.Controls.Button
@@ -103,6 +104,32 @@ function Initialize-WPFUI {
                         $newButton.Add_Click({
                             $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
                             Start-Process $appObject.link
+                        })
+                    }
+                    "Open" {
+                        # Prefer a known local web interface (config/applications.json "webui")
+                        # over guessing - only set for apps with a fixed, documented port. For
+                        # everything else, fall back to searching the Start Menu for a matching
+                        # shortcut, since community installers run interactively (the user picks
+                        # the install location) and winget/choco don't hand back an install path.
+                        $newButton.Add_MouseEnter({
+                            $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
+                            if ($appObject.webui) {
+                                $this.Tag = $appObject.webui
+                                $this.ToolTip = "Open web interface`n$($appObject.webui)"
+                            } else {
+                                $this.Tag = Find-WinUtilAppLaunchTarget -AppName $appObject.content
+                                $this.ToolTip = if ($this.Tag) {
+                                    "Launch $($appObject.content)"
+                                } else {
+                                    "Couldn't find a web interface or installed shortcut for $($appObject.content)"
+                                }
+                            }
+                        })
+                        $newButton.Add_Click({
+                            if ($this.Tag) {
+                                Start-Process $this.Tag
+                            }
                         })
                     }
                 }
