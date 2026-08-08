@@ -26,6 +26,13 @@ function Invoke-WPFUnInstall {
     $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object Name, Description| Out-String)")
     $MessageIcon = "Information"
 
+    # Unregistering a WSL distro permanently deletes its filesystem, not just "removes" it -
+    # worth calling out explicitly here rather than folding it into the generic app list above.
+    $wslDataLossPackages = @($PackagesToUninstall | Where-Object { $_.installType -eq "wslFeature" -or $_.installType -eq "wslDistro" })
+    if ($wslDataLossPackages.Count -gt 0) {
+        $Messageboxbody += "`nUninstalling WSL2 and/or a WSL distro permanently deletes that distro's filesystem and all data inside it - this cannot be undone."
+    }
+
     $confirm = Show-WinUtilMessage -Message $Messageboxbody -Title $MessageboxTitle -Button $ButtonType -Icon $MessageIcon
 
     if($confirm -eq "No") {return}
@@ -47,9 +54,7 @@ function Invoke-WPFUnInstall {
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
         # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
-        # github (arbitrary third-party installers with no known uninstaller) and the WSL
-        # feature/distro themselves (removing those is a system-wide, hard-to-reverse change
-        # well beyond "uninstall this one app" - not done implicitly).
+        # github (arbitrary third-party installers with no known uninstaller).
         $unsupported = [System.Collections.Generic.List[string]]::new()
         $packagesDirect = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['Direct'])) {
@@ -68,10 +73,12 @@ function Invoke-WPFUnInstall {
             }
         }
         foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
-        foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
-        foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
+        $packagesWslDistro = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $packagesWslDistro.Add($p) } }
+        $packagesWslFeature = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $packagesWslFeature.Add($p) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count + @($packagesWslDistro).Count + @($packagesWslFeature).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
 
@@ -83,7 +90,7 @@ function Invoke-WPFUnInstall {
             if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
         }
         $failedPackages = [System.Collections.Generic.List[string]]::new()
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -201,6 +208,31 @@ function Invoke-WPFUnInstall {
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Streaming Library Manager ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
+            # Distro before feature - Uninstall-WinUtilFeatureWSL also unregisters WinUtil's own
+            # distro(s) itself, so running the distro bucket first just means that work is
+            # already done (and skipped as a no-op) by the time the feature bucket reaches it.
+            foreach ($uninstallBucket in @(
+                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Uninstaller = { param($pkgs) Uninstall-WinUtilWSLDistro -Packages $pkgs } },
+                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Uninstaller = { param($pkgs) Uninstall-WinUtilFeatureWSL -Packages $pkgs } }
+            )) {
+                if (@($uninstallBucket.Packages).Count -eq 0) { continue }
+
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $($uninstallBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                & $uninstallBucket.Uninstaller $uninstallBucket.Packages
+
+                $completedPackages += @($uninstallBucket.Packages).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $($uninstallBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }

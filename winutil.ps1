@@ -6302,6 +6302,48 @@ function Test-WinUtilWSLFeatureEnabled {
     }
 }
 
+Function Uninstall-WinUtilFeatureWSL {
+    <#
+    .SYNOPSIS
+        Uninstalls the WSL2 platform: stops any running distros, unregisters the distro(s)
+        WinUtil's own catalog manages (e.g. Debian), then runs "wsl --uninstall".
+
+    .DESCRIPTION
+        Only unregisters distros declared in WinUtil's own catalog (installType "wslDistro") -
+        never anything else that might be registered on this machine, since that data isn't
+        ours to delete. "wsl --uninstall" itself doesn't require every distro to be gone first;
+        it removes the WSL runtime/app regardless, and any distro left registered (e.g. one the
+        user set up themselves, outside WinUtil) is left orphaned - not usable via wsl until the
+        runtime is reinstalled, but not deleted either.
+
+        Does not disable the underlying Windows optional features (Microsoft-Windows-Subsystem-
+        Linux, VirtualMachinePlatform) - "wsl --uninstall" doesn't touch those, and turning them
+        off is a separate, more disruptive step (needs a restart) that isn't done here.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [object[]]$Packages
+    )
+
+    $ownedDistros = @($sync.configs.applicationsHashtable.Values | Where-Object { $_.installType -eq "wslDistro" })
+    if ($ownedDistros.Count -gt 0) {
+        Uninstall-WinUtilWSLDistro -Packages $ownedDistros
+    }
+
+    foreach ($package in $Packages) {
+        $name = $package.content
+        Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
+        try {
+            & wsl --shutdown 2>&1 | Out-Null
+            $output = & wsl --uninstall 2>&1 | Out-String
+            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
+        } catch {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall WSL2: $_"
+        }
+    }
+}
+
 Function Uninstall-WinUtilProgramDirect {
     <#
     .SYNOPSIS
@@ -6394,6 +6436,44 @@ Function Uninstall-WinUtilStreamLinkManager {
             Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall ${name}: $_"
+        }
+    }
+}
+
+Function Uninstall-WinUtilWSLDistro {
+    <#
+    .SYNOPSIS
+        Unregisters a WSL distro (e.g. Debian) - this permanently deletes its filesystem and
+        all data inside it, not just "removes" it. Only ever call this for distros WinUtil's
+        own catalog installed - never for an arbitrary/unknown distro, since that data isn't
+        ours to delete.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [object[]]$Packages
+    )
+
+    foreach ($package in $Packages) {
+        $name = $package.content
+        $distro = $package.distro
+
+        if ([string]::IsNullOrWhiteSpace($distro)) {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "WSL distro uninstall for $name is missing distro."
+            continue
+        }
+
+        if (-not (Test-WinUtilWSLDistroInstalled -Distro $distro)) {
+            Write-WinUtilLog -Component "Package" -Message "$name ($distro) is not registered - nothing to uninstall."
+            continue
+        }
+
+        Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
+        try {
+            & wsl --terminate $distro 2>&1 | Out-Null
+            $output = & wsl --unregister $distro 2>&1 | Out-String
+            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+        } catch {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to unregister WSL distro ${distro}: $_"
         }
     }
 }
@@ -8797,6 +8877,13 @@ function Invoke-WPFUnInstall {
     $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object Name, Description| Out-String)")
     $MessageIcon = "Information"
 
+    # Unregistering a WSL distro permanently deletes its filesystem, not just "removes" it -
+    # worth calling out explicitly here rather than folding it into the generic app list above.
+    $wslDataLossPackages = @($PackagesToUninstall | Where-Object { $_.installType -eq "wslFeature" -or $_.installType -eq "wslDistro" })
+    if ($wslDataLossPackages.Count -gt 0) {
+        $Messageboxbody += "`nUninstalling WSL2 and/or a WSL distro permanently deletes that distro's filesystem and all data inside it - this cannot be undone."
+    }
+
     $confirm = Show-WinUtilMessage -Message $Messageboxbody -Title $MessageboxTitle -Button $ButtonType -Icon $MessageIcon
 
     if($confirm -eq "No") {return}
@@ -8818,9 +8905,7 @@ function Invoke-WPFUnInstall {
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
         # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
-        # github (arbitrary third-party installers with no known uninstaller) and the WSL
-        # feature/distro themselves (removing those is a system-wide, hard-to-reverse change
-        # well beyond "uninstall this one app" - not done implicitly).
+        # github (arbitrary third-party installers with no known uninstaller).
         $unsupported = [System.Collections.Generic.List[string]]::new()
         $packagesDirect = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['Direct'])) {
@@ -8839,10 +8924,12 @@ function Invoke-WPFUnInstall {
             }
         }
         foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
-        foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
-        foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
+        $packagesWslDistro = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $packagesWslDistro.Add($p) } }
+        $packagesWslFeature = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $packagesWslFeature.Add($p) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count + @($packagesWslDistro).Count + @($packagesWslFeature).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
 
@@ -8854,7 +8941,7 @@ function Invoke-WPFUnInstall {
             if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
         }
         $failedPackages = [System.Collections.Generic.List[string]]::new()
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -8972,6 +9059,31 @@ function Invoke-WPFUnInstall {
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Streaming Library Manager ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
+            # Distro before feature - Uninstall-WinUtilFeatureWSL also unregisters WinUtil's own
+            # distro(s) itself, so running the distro bucket first just means that work is
+            # already done (and skipped as a no-op) by the time the feature bucket reaches it.
+            foreach ($uninstallBucket in @(
+                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Uninstaller = { param($pkgs) Uninstall-WinUtilWSLDistro -Packages $pkgs } },
+                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Uninstaller = { param($pkgs) Uninstall-WinUtilFeatureWSL -Packages $pkgs } }
+            )) {
+                if (@($uninstallBucket.Packages).Count -eq 0) { continue }
+
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $($uninstallBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                & $uninstallBucket.Uninstaller $uninstallBucket.Packages
+
+                $completedPackages += @($uninstallBucket.Packages).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $($uninstallBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
