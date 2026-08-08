@@ -80,6 +80,47 @@ Describe "Get-WinUtilSelectedPackages" {
     }
 }
 
+Describe "Get-WinUtilSelectedPackages against the real Invoke-WPFUIThread" {
+    # Regression guard for a real shipped bug: every other test in this file mocks
+    # Invoke-WPFUIThread away, which is exactly how a regression in its actual Dispatcher.Invoke
+    # cast went undetected. It was briefly changed from [action] (void) to [Func[object]] to let
+    # one new caller get a Yes/No answer back - but Invoke-WPFUIThread is called as a bare,
+    # uncaptured statement in dozens of places throughout the codebase, including the one
+    # Get-WinUtilSelectedPackages makes near the top to update the taskbar icon. Under
+    # Func[object], that bare call's result got collected into the *calling* function's own
+    # output stream once gathered by ITS caller, silently turning Get-WinUtilSelectedPackages's
+    # real Hashtable return value into a 2-element array (`@($null, $hashtable)`), so
+    # `$result['Winget']` returned nothing. This test dot-sources and calls the real
+    # Invoke-WPFUIThread (via a real WPF Dispatcher) instead of mocking it away, so that
+    # particular class of regression can't hide again.
+    BeforeAll {
+        Add-Type -AssemblyName PresentationFramework
+        . (Join-Path $script:repoRoot "functions\public\Invoke-WPFUIThread.ps1")
+        function Set-WinUtilTaskbaritem { param($state, $value, $overlay) }
+
+        $script:sync = @{}
+        $script:sync.form = New-Object System.Windows.Window
+        $script:sync.form.Show()
+        $script:sync.form.Hide()
+    }
+
+    AfterAll {
+        $script:sync.form.Close()
+        Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "returns a real Hashtable indexable by bucket name, not an array polluted by Invoke-WPFUIThread's own output" {
+        $packages = @(
+            [pscustomobject]@{ winget = "Docker.DockerDesktop" }
+        )
+
+        $result = Get-WinUtilSelectedPackages -PackageList $packages -Preference "Winget"
+
+        $result | Should -BeOfType [hashtable]
+        (@($result["Winget"]) -join "|") | Should -Be "Docker.DockerDesktop"
+    }
+}
+
 Describe "Test-WinUtilPackageManager" {
     BeforeEach {
         Mock Write-Host { }

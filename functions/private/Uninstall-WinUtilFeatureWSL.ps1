@@ -10,8 +10,8 @@ Function Uninstall-WinUtilFeatureWSL {
         "wslDistro") - never anything else that might be registered on this machine, since that
         data isn't ours to delete. Unregistering permanently deletes that distro's filesystem,
         so - unlike every other step here - this specifically asks for a Yes/No confirmation
-        before doing it (via Invoke-WPFUIThread, since this runs in the background install
-        runspace, not the UI thread) rather than treating it as an implicit side effect of
+        before doing it (via Invoke-WPFUIThreadWithResult, since this runs in the background
+        install runspace, not the UI thread) rather than treating it as an implicit side effect of
         uninstalling WSL2. Declining leaves the distro registered (orphaned once the WSL runtime
         below is gone, but not deleted) - "wsl --uninstall" doesn't require every distro to be
         gone first; it removes the WSL runtime/app regardless.
@@ -32,7 +32,7 @@ Function Uninstall-WinUtilFeatureWSL {
 
     if ($registeredOwnedDistros.Count -gt 0) {
         $distroNames = ($registeredOwnedDistros | ForEach-Object { $_.content }) -join ", "
-        $confirmed = Invoke-WPFUIThread -ScriptBlock {
+        $confirmed = Invoke-WPFUIThreadWithResult -ScriptBlock {
             (Show-WinUtilMessage -Message "Uninstalling WSL2 will also permanently delete the following WSL distro(s) and all data inside them:`n - $distroNames`n`nDelete them now?" -Title "Confirm WSL distro deletion" -Button ([System.Windows.MessageBoxButton]::YesNo) -Icon "Warning") -eq [System.Windows.MessageBoxResult]::Yes
         }
 

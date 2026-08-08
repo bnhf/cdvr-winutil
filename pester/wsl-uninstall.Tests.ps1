@@ -31,7 +31,7 @@ BeforeAll {
     }
     function Test-WinUtilWSLDistroInstalled { param($Distro) $true }
     function Show-WinUtilMessage { param($Message, $Title, $Button, $Icon) }
-    function Invoke-WPFUIThread { param($ScriptBlock) }
+    function Invoke-WPFUIThreadWithResult { param($ScriptBlock) }
 }
 
 Describe "Uninstall-WinUtilWSLDistro" {
@@ -101,10 +101,10 @@ Describe "Uninstall-WinUtilFeatureWSL" {
         Mock Write-WinUtilLog { }
         Mock wsl { $global:LASTEXITCODE = 0 }
         Mock Test-WinUtilWSLDistroInstalled { $true }
-        # Invoke-WPFUIThread normally marshals to the UI thread's Dispatcher - here it just runs
+        # Invoke-WPFUIThreadWithResult normally marshals to the UI thread's Dispatcher - here it just runs
         # the scriptblock inline and returns its result, exercising the real confirm/decline
         # logic through Show-WinUtilMessage exactly as Uninstall-WinUtilFeatureWSL calls it.
-        Mock Invoke-WPFUIThread { & $ScriptBlock }
+        Mock Invoke-WPFUIThreadWithResult { & $ScriptBlock }
     }
 
     AfterEach {

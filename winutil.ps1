@@ -6332,8 +6332,8 @@ Function Uninstall-WinUtilFeatureWSL {
         "wslDistro") - never anything else that might be registered on this machine, since that
         data isn't ours to delete. Unregistering permanently deletes that distro's filesystem,
         so - unlike every other step here - this specifically asks for a Yes/No confirmation
-        before doing it (via Invoke-WPFUIThread, since this runs in the background install
-        runspace, not the UI thread) rather than treating it as an implicit side effect of
+        before doing it (via Invoke-WPFUIThreadWithResult, since this runs in the background
+        install runspace, not the UI thread) rather than treating it as an implicit side effect of
         uninstalling WSL2. Declining leaves the distro registered (orphaned once the WSL runtime
         below is gone, but not deleted) - "wsl --uninstall" doesn't require every distro to be
         gone first; it removes the WSL runtime/app regardless.
@@ -6354,7 +6354,7 @@ Function Uninstall-WinUtilFeatureWSL {
 
     if ($registeredOwnedDistros.Count -gt 0) {
         $distroNames = ($registeredOwnedDistros | ForEach-Object { $_.content }) -join ", "
-        $confirmed = Invoke-WPFUIThread -ScriptBlock {
+        $confirmed = Invoke-WPFUIThreadWithResult -ScriptBlock {
             (Show-WinUtilMessage -Message "Uninstalling WSL2 will also permanently delete the following WSL distro(s) and all data inside them:`n - $distroNames`n`nDelete them now?" -Title "Confirm WSL distro deletion" -Button ([System.Windows.MessageBoxButton]::YesNo) -Icon "Warning") -eq [System.Windows.MessageBoxResult]::Yes
         }
 
@@ -8834,13 +8834,42 @@ function Invoke-WPFUIElements {
 function Invoke-WPFUIThread ($ScriptBlock) {
     <#
     .SYNOPSIS
+        Runs a scriptblock synchronously on the UI thread. Void - see
+        Invoke-WPFUIThreadWithResult if a caller needs the scriptblock's return value.
+
+    .DESCRIPTION
+        Deliberately cast to Action, not Func[object] - a version of this cast to Func[object]
+        was tried and reverted. The problem: dozens of call sites across the codebase invoke
+        this as a bare, uncaptured statement in the middle of a function, well before that
+        function's own final `return`. Under Action, PowerShell discards whatever the scriptblock
+        produces, so those bare calls are harmless. Under Func[object], each one instead adds its
+        result to the *enclosing function's* own output stream - e.g. Get-WinUtilSelectedPackages
+        calls this near the top to update the taskbar icon, and its actual return value (a
+        hashtable) got silently wrapped into a 2-element array alongside that stray value,
+        so `$packagesSorted['Winget']` on the caller's side returned nothing. That is a real
+        production bug this shipped as (empty/lost package buckets on every install), not a
+        theoretical risk - Pester never caught it because Invoke-WPFUIThread is mocked out in
+        nearly every test file, so the return-stream interaction with real caller code was never
+        exercised.
+    #>
+    $sync.form.Dispatcher.Invoke([action]$ScriptBlock)
+}
+
+function Invoke-WPFUIThreadWithResult ($ScriptBlock) {
+    <#
+    .SYNOPSIS
         Runs a scriptblock synchronously on the UI thread and returns its result.
 
     .DESCRIPTION
-        Cast to Func[object] rather than Action - Action forces a void return, discarding
-        anything the scriptblock produces. Existing callers already ignore the return value, so
-        this is purely additive: it lets a caller in the background runspace show a modal (e.g.
-        a Yes/No confirmation) and get the answer back, which Action couldn't do.
+        A separate function from Invoke-WPFUIThread, not a shared implementation switching on a
+        parameter - the two must never be interchangeable at existing call sites. Invoke-
+        WPFUIThread is called as a bare, uncaptured statement in dozens of places throughout the
+        codebase, often mid-function rather than as the last statement; casting that shared
+        Dispatcher.Invoke to Func[object] instead of Action made every one of those bare calls
+        inject its result into the *enclosing function's* own return value once collected by its
+        caller - a real shipped bug (see Invoke-WPFUIThread's own comment for the concrete
+        failure). Use this only where the return value is actually consumed, e.g. a background
+        runspace showing a modal Yes/No confirmation and needing the answer back.
     #>
     $sync.form.Dispatcher.Invoke([Func[object]]$ScriptBlock)
 }
