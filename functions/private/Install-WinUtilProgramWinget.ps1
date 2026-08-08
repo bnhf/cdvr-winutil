@@ -26,7 +26,20 @@ Function Install-WinUtilProgramWinget {
         }
 
         Write-WinUtilLog -Component "Package" -Message "$Action winget package: $program (source: $source)"
-        $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        Write-WinUtilLog -Component "Package" -Message "$Action winget package completed: $program (exit code: $($process.ExitCode))"
+        # Run winget as the standard (non-elevated) user, not as WinUtil's own elevated
+        # process - winget refuses to manage per-user-scope packages while elevated
+        # ("The package installed for user scope cannot be uninstalled when running with
+        # administrator privileges."), and most winget packages install in user scope.
+        $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
+        if ($process.ExitCode -eq 0) {
+            Write-WinUtilLog -Component "Package" -Message "$Action winget package completed: $program"
+        } else {
+            $hint = if ($Action -eq 'Uninstall') {
+                " This commonly happens when winget can't manage a package that was installed in per-user scope while WinUtil is running elevated - if so, uninstall it via Windows Settings > Apps instead."
+            } else {
+                ""
+            }
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$Action winget package FAILED: $program (exit code: $($process.ExitCode)).$hint"
+        }
     }
 }

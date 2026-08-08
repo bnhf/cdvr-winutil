@@ -16,5 +16,9 @@ function Install-WinUtilProgramChoco {
 
     Write-WinUtilLog -Component "Package" -Message "$Action choco package(s): $($Programs -join ', ')"
     $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-    Write-WinUtilLog -Component "Package" -Message "$Action choco package(s) completed: $($Programs -join ', ') (exit code: $($process.ExitCode))"
+    if ($process.ExitCode -eq 0) {
+        Write-WinUtilLog -Component "Package" -Message "$Action choco package(s) completed: $($Programs -join ', ')"
+    } else {
+        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$Action choco package(s) FAILED: $($Programs -join ', ') (exit code: $($process.ExitCode))"
+    }
 }
