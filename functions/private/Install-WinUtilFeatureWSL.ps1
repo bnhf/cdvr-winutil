@@ -3,6 +3,18 @@ Function Install-WinUtilFeatureWSL {
     .SYNOPSIS
         Enables the WSL2 platform feature. First-time enable on many systems requires a
         reboot before WSL is actually usable - this does not claim silent one-click success.
+
+    .DESCRIPTION
+        Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
+        used elsewhere for quick DISM/registry checks - "wsl --install" can download the WSL
+        kernel/app itself and, on a system where WSL isn't installed yet, can also try to reach
+        the Microsoft Store, which can hang for a long time on a slow/absent connection (the
+        same real-world quirk Invoke-WinUtilWithTimeout was originally built to guard against
+        elsewhere). Verifies success afterward via Test-WinUtilWSLFeatureEnabled rather than
+        trusting wsl.exe's own exit behavior - a timeout here isn't necessarily a real failure,
+        WSL2 may already be fully enabled underneath it (confirmed live for the sibling distro
+        install below: the distro had already finished registering while the wsl.exe call
+        itself never returned control to us).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -12,16 +24,31 @@ Function Install-WinUtilFeatureWSL {
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
-        try {
-            $output = (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ScriptBlock {
+            try {
+                return (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+            } catch {
+                return $null
+            }
+        }
+
+        if ($null -eq $output) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "wsl --install --no-distribution did not finish within the expected time - checking whether WSL2 actually enabled anyway."
+        } else {
             Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install completed with no console output)" })
-            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: if this is the first time WSL has been enabled on this machine, a restart may be required before it is usable."
-            # Clears the "uninstalled this session" flag Uninstall-WinUtilFeatureWSL sets, so
-            # Test-WinUtilWSLFeatureEnabled goes back to trusting the real DISM/optional-feature
-            # state now that WSL2 has been (re)installed.
-            if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $false }
-        } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to enable WSL: $_"
+        }
+
+        # Clears the "uninstalled this session" flag Uninstall-WinUtilFeatureWSL sets, so
+        # Test-WinUtilWSLFeatureEnabled goes back to trusting the real DISM/wsl.exe-backed state
+        # now that WSL2 has been (re)installed - has to happen before the verification check
+        # right below, or that check would still see the stale "uninstalled" flag.
+        if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $false }
+
+        if (Test-WinUtilWSLFeatureEnabled) {
+            Write-WinUtilLog -Component "Package" -Message "${name}: WSL2 is enabled and usable."
+        } else {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: WSL2 does not appear usable yet - if this is the first time it's been enabled on this machine, a restart is likely required."
         }
     }
 }

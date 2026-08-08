@@ -19,6 +19,12 @@ Function Uninstall-WinUtilFeatureWSL {
         Does not disable the underlying Windows optional features (Microsoft-Windows-Subsystem-
         Linux, VirtualMachinePlatform) - "wsl --uninstall" doesn't touch those, and turning them
         off is a separate, more disruptive step (needs a restart) that isn't done here.
+
+        Bounded via Invoke-WinUtilWithTimeout, not the few-second default used elsewhere for
+        quick DISM/registry checks - wsl.exe can occasionally hang for reasons unrelated to this
+        specific command (see Install-WinUtilWSLDistro.ps1 for a confirmed real case on the
+        install side), and there's no reason to trust --shutdown/--uninstall are immune just
+        because they aren't known to hit that exact case.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -46,17 +52,28 @@ Function Uninstall-WinUtilFeatureWSL {
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
-        try {
-            & wsl --shutdown 2>&1 | Out-Null
-            $output = (& wsl --uninstall 2>&1 | Out-String).Trim()
-            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --uninstall completed with no console output)" })
-            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
-            # The optional features stay "Enabled" per DISM even though the runtime is now gone
-            # (see above) - flag this so Test-WinUtilWSLFeatureEnabled doesn't keep reporting
-            # WSL2 as usable for the rest of this app session.
-            if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $true }
-        } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall WSL2: $_"
+
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ScriptBlock {
+            try {
+                & wsl --shutdown 2>&1 | Out-Null
+                return (& wsl --uninstall 2>&1 | Out-String).Trim()
+            } catch {
+                return $null
+            }
         }
+
+        if ($null -eq $output) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "wsl --uninstall did not finish within the expected time."
+        } else {
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --uninstall completed with no console output)" })
+        }
+        Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
+        # The optional features stay "Enabled" per DISM even though the runtime is now gone
+        # (see above) - flag this so Test-WinUtilWSLFeatureEnabled doesn't keep reporting
+        # WSL2 as usable for the rest of this app session. Set unconditionally (not gated on
+        # $output being non-null) - we attempted the uninstall regardless of whether it
+        # finished within the timeout, and the safer assumption is "no longer trustworthy as
+        # enabled" rather than risk the opposite mistake again.
+        if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $true }
     }
 }

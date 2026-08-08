@@ -10,6 +10,14 @@ Function Install-WinUtilWSLCommand {
         its \\wsl.localhost UNC path, then executed as a script - this avoids the nested
         quoting problems of passing a command with embedded $(...) and quotes through
         `wsl -d <distro> -- bash -c "..."`.
+
+        Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
+        used elsewhere for quick DISM/registry checks - these commands can do real work (e.g.
+        pulling a Docker image) that legitimately takes a while, and wsl.exe itself can hang for
+        unrelated reasons (see Install-WinUtilWSLDistro.ps1 for a confirmed real case). Unlike
+        that function, there's no independent way to verify an arbitrary command's success after
+        a timeout, so a timeout here is logged as a real, if inconclusive, warning rather than
+        silently assumed fine.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -45,9 +53,22 @@ Function Install-WinUtilWSLCommand {
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
         try {
             Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
-            $output = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
-            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
-            Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
+
+            $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -ScriptBlock {
+                param($distro, $scriptName)
+                try {
+                    return (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+                } catch {
+                    return $null
+                }
+            }
+
+            if ($null -eq $output) {
+                Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name $($Action.ToLower()) did not finish within the expected time - it may still be running inside WSL, or may need interactive input this app can't provide."
+            } else {
+                Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
+                Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
+            }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run $($Action.ToLower()) for ${name}: $_"
         } finally {

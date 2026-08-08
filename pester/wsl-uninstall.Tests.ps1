@@ -6,6 +6,7 @@ BeforeAll {
     Add-Type -AssemblyName PresentationFramework
 
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    . (Join-Path $script:repoRoot "functions\private\Invoke-WinUtilWithTimeout.ps1")
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilWSLDistro.ps1")
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilFeatureWSL.ps1")
 
@@ -38,6 +39,10 @@ Describe "Uninstall-WinUtilWSLDistro" {
     BeforeEach {
         Mock Write-WinUtilLog { }
         Mock wsl { $global:LASTEXITCODE = 0 }
+        # Runs the real scriptblock inline (splatting ArgumentList through) instead of the real
+        # isolated runspace, so the "wsl" mock above stays reachable - matches the pattern used
+        # for Invoke-WinUtilWithTimeout throughout the rest of this suite.
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock @ArgumentList }
     }
 
     It "terminates and unregisters a distro that is currently registered" {
@@ -76,7 +81,15 @@ Describe "Uninstall-WinUtilWSLDistro" {
         # straight through used to throw "Cannot bind argument ... because it is an empty
         # string", which then got caught and misreported as "failed to uninstall", masking
         # whatever the command's real result was.
-        Mock Test-WinUtilWSLDistroInstalled { $true }
+        # Stateful: true on the first check (still registered, so the unregister attempt
+        # proceeds), false afterward (confirms it actually got removed) - matches what the
+        # function itself checks before and after the unregister attempt.
+        $script:distroStillRegistered = $true
+        Mock Test-WinUtilWSLDistroInstalled {
+            $result = $script:distroStillRegistered
+            $script:distroStillRegistered = $false
+            $result
+        }
         Mock wsl { $global:LASTEXITCODE = 0; "" }
 
         $package = [pscustomobject]@{ content = "Debian (WSL)"; distro = "Debian" }
@@ -84,6 +97,8 @@ Describe "Uninstall-WinUtilWSLDistro" {
 
         Should -Invoke -CommandName Write-WinUtilLog -Times 0 -Exactly -ParameterFilter { $Level -eq "ERROR" }
         Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -like "*no console output*" }
+
+        Remove-Variable -Name distroStillRegistered -Scope Script -ErrorAction SilentlyContinue
     }
 }
 
@@ -105,6 +120,7 @@ Describe "Uninstall-WinUtilFeatureWSL" {
         # the scriptblock inline and returns its result, exercising the real confirm/decline
         # logic through Show-WinUtilMessage exactly as Uninstall-WinUtilFeatureWSL calls it.
         Mock Invoke-WPFUIThreadWithResult { & $ScriptBlock }
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock @ArgumentList }
     }
 
     AfterEach {
@@ -182,6 +198,14 @@ Describe "Uninstall-WinUtilFeatureWSL" {
         # threw, which was then caught and misreported as "Failed to uninstall WSL2".
         Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes }
         Mock wsl { $global:LASTEXITCODE = 0; "" } -ParameterFilter { ($Arguments -join " ") -eq "--uninstall" }
+        # Stateful: true on the first check (still registered, so Uninstall-WinUtilWSLDistro's
+        # unregister attempt proceeds), false afterward (confirms it actually got removed).
+        $script:distroStillRegistered = $true
+        Mock Test-WinUtilWSLDistroInstalled {
+            $result = $script:distroStillRegistered
+            $script:distroStillRegistered = $false
+            $result
+        }
 
         $wsl2Package = [pscustomobject]@{ content = "WSL2" }
         { Uninstall-WinUtilFeatureWSL -Packages @($wsl2Package) } | Should -Not -Throw
@@ -191,5 +215,7 @@ Describe "Uninstall-WinUtilFeatureWSL" {
         # "--unregister" call also produces empty output from the same default wsl mock (since
         # only "--uninstall" is overridden above), so a loose match would double-count both.
         Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -eq "(wsl --uninstall completed with no console output)" }
+
+        Remove-Variable -Name distroStillRegistered -Scope Script -ErrorAction SilentlyContinue
     }
 }

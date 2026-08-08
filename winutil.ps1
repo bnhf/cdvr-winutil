@@ -1422,6 +1422,18 @@ Function Install-WinUtilFeatureWSL {
     .SYNOPSIS
         Enables the WSL2 platform feature. First-time enable on many systems requires a
         reboot before WSL is actually usable - this does not claim silent one-click success.
+
+    .DESCRIPTION
+        Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
+        used elsewhere for quick DISM/registry checks - "wsl --install" can download the WSL
+        kernel/app itself and, on a system where WSL isn't installed yet, can also try to reach
+        the Microsoft Store, which can hang for a long time on a slow/absent connection (the
+        same real-world quirk Invoke-WinUtilWithTimeout was originally built to guard against
+        elsewhere). Verifies success afterward via Test-WinUtilWSLFeatureEnabled rather than
+        trusting wsl.exe's own exit behavior - a timeout here isn't necessarily a real failure,
+        WSL2 may already be fully enabled underneath it (confirmed live for the sibling distro
+        install below: the distro had already finished registering while the wsl.exe call
+        itself never returned control to us).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -1431,16 +1443,31 @@ Function Install-WinUtilFeatureWSL {
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
-        try {
-            $output = (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ScriptBlock {
+            try {
+                return (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+            } catch {
+                return $null
+            }
+        }
+
+        if ($null -eq $output) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "wsl --install --no-distribution did not finish within the expected time - checking whether WSL2 actually enabled anyway."
+        } else {
             Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install completed with no console output)" })
-            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: if this is the first time WSL has been enabled on this machine, a restart may be required before it is usable."
-            # Clears the "uninstalled this session" flag Uninstall-WinUtilFeatureWSL sets, so
-            # Test-WinUtilWSLFeatureEnabled goes back to trusting the real DISM/optional-feature
-            # state now that WSL2 has been (re)installed.
-            if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $false }
-        } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to enable WSL: $_"
+        }
+
+        # Clears the "uninstalled this session" flag Uninstall-WinUtilFeatureWSL sets, so
+        # Test-WinUtilWSLFeatureEnabled goes back to trusting the real DISM/wsl.exe-backed state
+        # now that WSL2 has been (re)installed - has to happen before the verification check
+        # right below, or that check would still see the stale "uninstalled" flag.
+        if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $false }
+
+        if (Test-WinUtilWSLFeatureEnabled) {
+            Write-WinUtilLog -Component "Package" -Message "${name}: WSL2 is enabled and usable."
+        } else {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: WSL2 does not appear usable yet - if this is the first time it's been enabled on this machine, a restart is likely required."
         }
     }
 }
@@ -1932,6 +1959,14 @@ Function Install-WinUtilWSLCommand {
         its \\wsl.localhost UNC path, then executed as a script - this avoids the nested
         quoting problems of passing a command with embedded $(...) and quotes through
         `wsl -d <distro> -- bash -c "..."`.
+
+        Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
+        used elsewhere for quick DISM/registry checks - these commands can do real work (e.g.
+        pulling a Docker image) that legitimately takes a while, and wsl.exe itself can hang for
+        unrelated reasons (see Install-WinUtilWSLDistro.ps1 for a confirmed real case). Unlike
+        that function, there's no independent way to verify an arbitrary command's success after
+        a timeout, so a timeout here is logged as a real, if inconclusive, warning rather than
+        silently assumed fine.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -1967,9 +2002,22 @@ Function Install-WinUtilWSLCommand {
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
         try {
             Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
-            $output = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
-            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
-            Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
+
+            $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -ScriptBlock {
+                param($distro, $scriptName)
+                try {
+                    return (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+                } catch {
+                    return $null
+                }
+            }
+
+            if ($null -eq $output) {
+                Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name $($Action.ToLower()) did not finish within the expected time - it may still be running inside WSL, or may need interactive input this app can't provide."
+            } else {
+                Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
+                Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
+            }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run $($Action.ToLower()) for ${name}: $_"
         } finally {
@@ -1982,6 +2030,20 @@ Function Install-WinUtilWSLDistro {
     <#
     .SYNOPSIS
         Installs a WSL distro (e.g. Debian). Requires the WSL2 feature to already be enabled.
+
+    .DESCRIPTION
+        Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
+        used elsewhere for quick DISM/registry checks - downloading and registering a distro's
+        filesystem image genuinely takes a while, and "wsl --install -d <distro>" can hang well
+        beyond that: it normally auto-launches the distro afterward for first-run setup (create
+        a UNIX username/password), an interactive prompt with no console attached in this app's
+        background install runspace. Confirmed live: the distro had already finished
+        registering (showed up in "wsl --list") while the install call itself never returned,
+        leaving the app looking stalled with no further progress or log output.
+
+        Verifies success afterward via Test-WinUtilWSLDistroInstalled rather than trusting
+        wsl.exe's own exit behavior, for the same reason - a timeout here isn't necessarily a
+        real failure, the distro may already be fully registered underneath it.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -1998,11 +2060,26 @@ Function Install-WinUtilWSLDistro {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Installing WSL distro $distro ($name)"
-        try {
-            $output = (& wsl --install -d $distro 2>&1 | Out-String).Trim()
+
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro) -ScriptBlock {
+            param($distro)
+            try {
+                return (& wsl --install -d $distro 2>&1 | Out-String).Trim()
+            } catch {
+                return $null
+            }
+        }
+
+        if ($null -eq $output) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "wsl --install -d $distro did not finish within the expected time - checking whether it actually registered anyway (this is normal if it's waiting on the first-run username prompt, which can't be answered here)."
+        } else {
             Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install -d $distro completed with no console output)" })
-        } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install WSL distro ${distro}: $_"
+        }
+
+        if (Test-WinUtilWSLDistroInstalled -Distro $distro) {
+            Write-WinUtilLog -Component "Package" -Message "$name ($distro) is installed and registered. If this was its first install, open a terminal and run `"wsl -d $distro`" once to finish creating its Linux user account."
+        } else {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$name ($distro) does not appear to be registered after the install attempt."
         }
     }
 }
@@ -6364,6 +6441,12 @@ Function Uninstall-WinUtilFeatureWSL {
         Does not disable the underlying Windows optional features (Microsoft-Windows-Subsystem-
         Linux, VirtualMachinePlatform) - "wsl --uninstall" doesn't touch those, and turning them
         off is a separate, more disruptive step (needs a restart) that isn't done here.
+
+        Bounded via Invoke-WinUtilWithTimeout, not the few-second default used elsewhere for
+        quick DISM/registry checks - wsl.exe can occasionally hang for reasons unrelated to this
+        specific command (see Install-WinUtilWSLDistro.ps1 for a confirmed real case on the
+        install side), and there's no reason to trust --shutdown/--uninstall are immune just
+        because they aren't known to hit that exact case.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -6391,18 +6474,29 @@ Function Uninstall-WinUtilFeatureWSL {
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
-        try {
-            & wsl --shutdown 2>&1 | Out-Null
-            $output = (& wsl --uninstall 2>&1 | Out-String).Trim()
-            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --uninstall completed with no console output)" })
-            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
-            # The optional features stay "Enabled" per DISM even though the runtime is now gone
-            # (see above) - flag this so Test-WinUtilWSLFeatureEnabled doesn't keep reporting
-            # WSL2 as usable for the rest of this app session.
-            if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $true }
-        } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall WSL2: $_"
+
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ScriptBlock {
+            try {
+                & wsl --shutdown 2>&1 | Out-Null
+                return (& wsl --uninstall 2>&1 | Out-String).Trim()
+            } catch {
+                return $null
+            }
         }
+
+        if ($null -eq $output) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "wsl --uninstall did not finish within the expected time."
+        } else {
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --uninstall completed with no console output)" })
+        }
+        Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
+        # The optional features stay "Enabled" per DISM even though the runtime is now gone
+        # (see above) - flag this so Test-WinUtilWSLFeatureEnabled doesn't keep reporting
+        # WSL2 as usable for the rest of this app session. Set unconditionally (not gated on
+        # $output being non-null) - we attempted the uninstall regardless of whether it
+        # finished within the timeout, and the safer assumption is "no longer trustworthy as
+        # enabled" rather than risk the opposite mistake again.
+        if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $true }
     }
 }
 
@@ -6509,6 +6603,16 @@ Function Uninstall-WinUtilWSLDistro {
         all data inside it, not just "removes" it. Only ever call this for distros WinUtil's
         own catalog installed - never for an arbitrary/unknown distro, since that data isn't
         ours to delete.
+
+    .DESCRIPTION
+        Bounded via Invoke-WinUtilWithTimeout, not the few-second default used elsewhere for
+        quick DISM/registry checks - deleting a distro's filesystem can take a little while, and
+        wsl.exe itself can occasionally hang for unrelated reasons (see
+        Install-WinUtilWSLDistro.ps1 for a confirmed real case on the install side; unregister
+        isn't known to hit the same interactive first-run prompt, but there's no reason to trust
+        it unconditionally either). Verifies success afterward via Test-WinUtilWSLDistroInstalled
+        rather than trusting wsl.exe's own exit behavior, for the same reason a timeout here
+        isn't necessarily a real failure.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -6530,12 +6634,27 @@ Function Uninstall-WinUtilWSLDistro {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
-        try {
-            & wsl --terminate $distro 2>&1 | Out-Null
-            $output = (& wsl --unregister $distro 2>&1 | Out-String).Trim()
+
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -ScriptBlock {
+            param($distro)
+            try {
+                & wsl --terminate $distro 2>&1 | Out-Null
+                return (& wsl --unregister $distro 2>&1 | Out-String).Trim()
+            } catch {
+                return $null
+            }
+        }
+
+        if ($null -eq $output) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "wsl --unregister $distro did not finish within the expected time - checking whether it actually unregistered anyway."
+        } else {
             Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --unregister $distro completed with no console output)" })
-        } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to unregister WSL distro ${distro}: $_"
+        }
+
+        if (Test-WinUtilWSLDistroInstalled -Distro $distro) {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$name ($distro) still appears registered after the unregister attempt."
+        } else {
+            Write-WinUtilLog -Component "Package" -Message "$name ($distro) is unregistered."
         }
     }
 }
