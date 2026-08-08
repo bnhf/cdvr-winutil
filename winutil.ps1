@@ -1014,6 +1014,9 @@ function Initialize-InstallAppEntry {
         $icon.SetResourceReference([Windows.FrameworkElement]::WidthProperty, "AppEntryIconSize")
         $icon.SetResourceReference([Windows.FrameworkElement]::HeightProperty, "AppEntryIconSize")
         $icon.Margin = New-Object Windows.Thickness(0, 0, 8, 0)
+        # Needed for "iconScale" below - an oversized Image would otherwise overflow into
+        # neighboring tile content instead of being cropped to this slot.
+        $icon.ClipToBounds = $true
         $fallback = New-Object Windows.Controls.TextBlock
         $fallback.Text = $app.content.TrimStart(".").Substring(0, 1).ToUpper()
         $fallback.FontWeight = "Bold"; $fallback.HorizontalAlignment = "Center"; $fallback.VerticalAlignment = "Center"
@@ -1040,6 +1043,22 @@ function Initialize-InstallAppEntry {
             $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
             $bitmap.EndInit()
             $logo.Source = $bitmap
+
+            # Some source icons carry a lot of built-in canvas padding (Windows Store "plate"
+            # margins, generous safe-area padding, etc.) that makes them look noticeably
+            # smaller than other apps' icons once Uniform-stretched into the same fixed slot.
+            # config/applications.json "iconScale" renders the image larger than the slot and
+            # lets the icon Grid's clip (above) crop the overflow - zooming past the padding
+            # rather than fitting the whole (mostly-empty) canvas.
+            $iconScale = if ($app.iconScale) { [double]$app.iconScale } else { 1.0 }
+            if ($iconScale -ne 1.0) {
+                $baseIconSize = [double]$sync.Form.Resources["AppEntryIconSize"]
+                $logo.Width = $baseIconSize * $iconScale
+                $logo.Height = $baseIconSize * $iconScale
+                $logo.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+                $logo.VerticalAlignment = [Windows.VerticalAlignment]::Center
+            }
+
             $logo.Add_ImageFailed({ $this.Visibility = "Collapsed"; $this.Parent.Children[0].Visibility = "Visible" })
             [void]$icon.Children.Add($logo)
         }
@@ -2096,12 +2115,24 @@ Function Invoke-WinUtilCurrentSystem {
     param(
         $CheckBox
     )
+    # "Show Installed Apps" (checkbox "choco"/"winget") calls winget/choco once per app, which
+    # is slow enough to be noticeable with no feedback - report per-app progress on the same
+    # window-level indicator the install/uninstall workflows use, so it reads the same way.
+    if ($CheckBox -eq "choco" -or $checkbox -eq "winget") {
+        $appsToCheck = @($sync.configs.applicationsHashtable.GetEnumerator())
+        $totalToCheck = $appsToCheck.Count
+        $checkedCount = 0
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Checking installed apps (0/$totalToCheck)" -Percent 0
+    }
+
     if ($CheckBox -eq "choco") {
         $apps = (choco list | Select-String -Pattern "^\S+").Matches.Value
-        $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-            $packageId = ($_.Value.choco -split ";")[-1].Trim()
+        foreach ($entry in $appsToCheck) {
+            $checkedCount++
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Checking $($entry.Value.content) ($checkedCount/$totalToCheck)" -Percent ([int](($checkedCount / $totalToCheck) * 100))
+            $packageId = ($entry.Value.choco -split ";")[-1].Trim()
             if ($packageId -ne "na" -and $packageId -in $apps) {
-                Write-Output $_.Key
+                Write-Output $entry.Key
             }
         }
     }
@@ -2125,13 +2156,15 @@ Function Invoke-WinUtilCurrentSystem {
             # unreliable for apps that self-update outside of winget (e.g. Firefox showed up
             # only as an ARP registry key, with no "Mozilla.Firefox" id/source at all, even
             # though a targeted --id --exact lookup for it resolves correctly).
-            $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-                $packageId = (($_.Value.winget -split ";")[-1] -replace "^msstore:", "").Trim()
+            foreach ($entry in $appsToCheck) {
+                $checkedCount++
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Checking $($entry.Value.content) ($checkedCount/$totalToCheck)" -Percent ([int](($checkedCount / $totalToCheck) * 100))
+                $packageId = (($entry.Value.winget -split ";")[-1] -replace "^msstore:", "").Trim()
                 if ([string]::IsNullOrWhiteSpace($packageId) -or $packageId -eq "na") {
-                    return
+                    continue
                 }
                 if (Test-WinUtilProgramInstalled -WingetId $packageId) {
-                    Write-Output $_.Key
+                    Write-Output $entry.Key
                 }
             }
         } finally {
@@ -2143,11 +2176,7 @@ Function Invoke-WinUtilCurrentSystem {
     # their own checks - this runs for either package-manager preference, since $CheckBox is
     # "choco" xor "winget" per call (never both), while WSL detection isn't preference-specific.
     if ($CheckBox -eq "choco" -or $CheckBox -eq "winget") {
-        $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-            # Capture the entry before switching - inside a switch's matched-clause script
-            # blocks, $_ is rebound to the switch's own subject value, shadowing the $_ from
-            # this enclosing ForEach-Object.
-            $entry = $_
+        foreach ($entry in $appsToCheck) {
             switch ($entry.Value.installType) {
                 "wslFeature" {
                     if (Test-WinUtilWSLFeatureEnabled) { Write-Output $entry.Key }
@@ -2159,6 +2188,7 @@ Function Invoke-WinUtilCurrentSystem {
                 }
             }
         }
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Finished checking installed apps" -Percent 100
     }
 
     if ($CheckBox -eq "tweaks") {
@@ -2355,7 +2385,6 @@ function Invoke-WinUtilFontScaling {
         "AppEntryWidth",
         "AppEntryNameMaxWidth",
         "AppEntryNameMinHeight",
-        "AppEntrySubtitleMinHeight",
         "SearchBarWidth",
         "SearchBarHeight",
         "CustomDialogWidth",
@@ -8791,6 +8820,8 @@ $sync.configs.applications = @'
     "content": "Windows Terminal",
     "description": "Modern terminal application for command-line shells like PowerShell and WSL, with tabs and profiles.",
     "link": "https://aka.ms/terminal",
+    "icon": "https://raw.githubusercontent.com/microsoft/terminal/main/res/terminal/images/Square44x44Logo.targetsize-256_altform-unplated.png",
+    "handle": "Microsoft",
     "winget": "Microsoft.WindowsTerminal",
     "foss": true
   },
@@ -8800,6 +8831,7 @@ $sync.configs.applications = @'
     "content": "Tailscale",
     "description": "Zero-config mesh VPN built on WireGuard, useful for reaching your Channels DVR server remotely without port forwarding.",
     "link": "https://tailscale.com",
+    "handle": "Tailscale Inc.",
     "winget": "Tailscale.Tailscale",
     "foss": true
   },
@@ -8809,6 +8841,7 @@ $sync.configs.applications = @'
     "content": "Docker Desktop",
     "description": "Docker Desktop is required to run several Channels DVR ecosystem add-ons, including Olivetin (EZ-Start).",
     "link": "https://www.docker.com/products/docker-desktop/",
+    "handle": "Docker, Inc.",
     "winget": "Docker.DockerDesktop",
     "foss": false
   },
@@ -8818,6 +8851,7 @@ $sync.configs.applications = @'
     "content": "Node.js",
     "description": "JavaScript runtime required by npm-distributed Channels DVR tools such as Prismcast.",
     "link": "https://nodejs.org/",
+    "handle": "OpenJS Foundation",
     "winget": "OpenJS.NodeJS",
     "foss": true
   },
@@ -8826,6 +8860,7 @@ $sync.configs.applications = @'
     "content": "WSL2",
     "description": "Windows Subsystem for Linux 2 - required to run Debian and any WSL-hosted Channels DVR add-ons. Enabling it for the first time may require a restart.",
     "link": "https://learn.microsoft.com/windows/wsl/",
+    "handle": "Microsoft",
     "installType": "wslFeature",
     "foss": true
   },
@@ -8834,6 +8869,7 @@ $sync.configs.applications = @'
     "content": "Debian (WSL)",
     "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup.",
     "link": "https://www.debian.org/",
+    "handle": "Debian Project",
     "installType": "wslDistro",
     "distro": "Debian",
     "requires": [
@@ -8847,6 +8883,7 @@ $sync.configs.applications = @'
     "content": "Brave",
     "description": "Brave is a privacy-focused web browser that blocks ads and trackers, offering a faster and safer browsing experience.",
     "link": "https://www.brave.com",
+    "handle": "Brave Software",
     "winget": "Brave.Brave",
     "foss": true
   },
@@ -8856,6 +8893,7 @@ $sync.configs.applications = @'
     "content": "Chrome",
     "description": "Google Chrome is a widely used web browser known for its speed, simplicity, and seamless integration with Google services.",
     "link": "https://www.google.com/chrome/",
+    "handle": "Google",
     "winget": "Google.Chrome.EXE",
     "foss": false
   },
@@ -8865,6 +8903,7 @@ $sync.configs.applications = @'
     "content": "Firefox",
     "description": "Mozilla Firefox is an open-source web browser known for its customization options, privacy features, and extensions.",
     "link": "https://www.mozilla.org/en-US/firefox/new/",
+    "handle": "Mozilla",
     "winget": "Mozilla.Firefox",
     "foss": true
   },
@@ -8874,6 +8913,7 @@ $sync.configs.applications = @'
     "content": "Edge",
     "description": "Microsoft Edge is a modern web browser built on Chromium, offering performance, security, and integration with Microsoft services.",
     "link": "https://www.microsoft.com/edge",
+    "handle": "Microsoft",
     "winget": "Microsoft.Edge",
     "foss": false
   },
@@ -8883,6 +8923,7 @@ $sync.configs.applications = @'
     "content": "Vivaldi",
     "description": "Vivaldi is a highly customizable web browser with a focus on user personalization and productivity features.",
     "link": "https://vivaldi.com/",
+    "handle": "Vivaldi Technologies",
     "winget": "Vivaldi.Vivaldi",
     "foss": false
   },
@@ -8945,6 +8986,7 @@ $sync.configs.applications = @'
     "description": "Desktop client for Channels DVR by jay3702.",
     "link": "https://github.com/jay3702/DVRDesk",
     "icon": "https://raw.githubusercontent.com/jay3702/DVRDesk/main/src-tauri/icons/icon.png",
+    "iconScale": 1.3,
     "handle": "@jay343",
     "installType": "github",
     "repo": "jay3702/DVRDesk",
@@ -9019,6 +9061,7 @@ $sync.configs.applications = @'
     "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js 22+ and Google Chrome.",
     "link": "https://github.com/hjdhjd/prismcast",
     "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
+    "iconScale": 1.3,
     "webui": "http://localhost:5589",
     "handle": "@hjd",
     "installType": "npm",
@@ -9872,7 +9915,6 @@ $sync.configs.themes = @'
     "AppEntrySubtitleFontSize": "10.5",
     "AppEntryNameMaxWidth": "150",
     "AppEntryNameMinHeight": "34",
-    "AppEntrySubtitleMinHeight": "27",
     "AppEntryIconSize": "28",
     "AppEntryMargin": "3",
     "AppEntryBorderThickness": "1",
@@ -11792,12 +11834,11 @@ $inputXML = @'
         <Setter Property="Foreground" Value="{DynamicResource ToggleButtonOnColor}"/>
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="TextWrapping" Value="Wrap"/>
+        <!-- Capped to one line, truncated with an ellipsis instead of wrapping - wrapping
+             here made tiles with a long subtitle+handle line taller than the rest of the grid. -->
+        <Setter Property="TextWrapping" Value="NoWrap"/>
+        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         <Setter Property="MaxWidth" Value="{DynamicResource AppEntryNameMaxWidth}"/>
-        <!-- Reserve 2 lines' height on every tile - the combined subtitle+handle text (e.g.
-             Olivetin's "(Includes Portainer) @bnhf") can wrap to a second line, and this keeps
-             that from making just that one tile taller than the rest of the grid. -->
-        <Setter Property="MinHeight" Value="{DynamicResource AppEntrySubtitleMinHeight}"/>
     </Style>
     <Style x:Key="AppEntryButtonStyle" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource IconButtonSize}"/>

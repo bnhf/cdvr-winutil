@@ -70,6 +70,9 @@ function Initialize-InstallAppEntry {
         $icon.SetResourceReference([Windows.FrameworkElement]::WidthProperty, "AppEntryIconSize")
         $icon.SetResourceReference([Windows.FrameworkElement]::HeightProperty, "AppEntryIconSize")
         $icon.Margin = New-Object Windows.Thickness(0, 0, 8, 0)
+        # Needed for "iconScale" below - an oversized Image would otherwise overflow into
+        # neighboring tile content instead of being cropped to this slot.
+        $icon.ClipToBounds = $true
         $fallback = New-Object Windows.Controls.TextBlock
         $fallback.Text = $app.content.TrimStart(".").Substring(0, 1).ToUpper()
         $fallback.FontWeight = "Bold"; $fallback.HorizontalAlignment = "Center"; $fallback.VerticalAlignment = "Center"
@@ -96,6 +99,22 @@ function Initialize-InstallAppEntry {
             $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
             $bitmap.EndInit()
             $logo.Source = $bitmap
+
+            # Some source icons carry a lot of built-in canvas padding (Windows Store "plate"
+            # margins, generous safe-area padding, etc.) that makes them look noticeably
+            # smaller than other apps' icons once Uniform-stretched into the same fixed slot.
+            # config/applications.json "iconScale" renders the image larger than the slot and
+            # lets the icon Grid's clip (above) crop the overflow - zooming past the padding
+            # rather than fitting the whole (mostly-empty) canvas.
+            $iconScale = if ($app.iconScale) { [double]$app.iconScale } else { 1.0 }
+            if ($iconScale -ne 1.0) {
+                $baseIconSize = [double]$sync.Form.Resources["AppEntryIconSize"]
+                $logo.Width = $baseIconSize * $iconScale
+                $logo.Height = $baseIconSize * $iconScale
+                $logo.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+                $logo.VerticalAlignment = [Windows.VerticalAlignment]::Center
+            }
+
             $logo.Add_ImageFailed({ $this.Visibility = "Collapsed"; $this.Parent.Children[0].Visibility = "Visible" })
             [void]$icon.Children.Add($logo)
         }

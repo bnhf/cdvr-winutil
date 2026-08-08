@@ -127,12 +127,11 @@
         <Setter Property="Foreground" Value="{DynamicResource ToggleButtonOnColor}"/>
         <Setter Property="Margin" Value="{DynamicResource AppEntryMargin}"/>
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="TextWrapping" Value="Wrap"/>
+        <!-- Capped to one line, truncated with an ellipsis instead of wrapping - wrapping
+             here made tiles with a long subtitle+handle line taller than the rest of the grid. -->
+        <Setter Property="TextWrapping" Value="NoWrap"/>
+        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         <Setter Property="MaxWidth" Value="{DynamicResource AppEntryNameMaxWidth}"/>
-        <!-- Reserve 2 lines' height on every tile - the combined subtitle+handle text (e.g.
-             Olivetin's "(Includes Portainer) @bnhf") can wrap to a second line, and this keeps
-             that from making just that one tile taller than the rest of the grid. -->
-        <Setter Property="MinHeight" Value="{DynamicResource AppEntrySubtitleMinHeight}"/>
     </Style>
     <Style x:Key="AppEntryButtonStyle" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource IconButtonSize}"/>

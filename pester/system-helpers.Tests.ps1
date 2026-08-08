@@ -20,6 +20,7 @@ BeforeAll {
     }
     function Test-WinUtilWSLFeatureEnabled { $false }
     function Test-WinUtilWSLDistroInstalled { param($Distro) $false }
+    function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
     function Write-WinUtilLog { }
 }
 
@@ -56,6 +57,7 @@ Describe "Invoke-WinUtilCurrentSystem installed apps" {
             $script:chocoArguments = @($Arguments)
             @("Chocolatey v2", "git 2.0", "2 packages installed.")
         }
+        Mock Set-WinUtilTweaksProgressIndicator { }
         $script:wingetCalls = @()
     }
 
@@ -94,6 +96,16 @@ Describe "Invoke-WinUtilCurrentSystem installed apps" {
         $result | Should -Be @("WPFInstallGit")
         Should -Invoke -CommandName choco -Times 1 -Exactly
         $script:chocoArguments | Should -Be @("list")
+    }
+
+    It "reports per-app progress on the shared progress indicator while checking" {
+        Invoke-WinUtilCurrentSystem -CheckBox "winget" | Out-Null
+
+        # 1 initial "0/N" call + 1 per app checked (3) + 1 final "finished" call
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 5 -Exactly
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -ParameterFilter {
+            $Visible -eq $true -and $Percent -eq 100 -and $Label -eq "Finished checking installed apps"
+        } -Times 1 -Exactly
     }
 }
 

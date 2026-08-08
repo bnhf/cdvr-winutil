@@ -51,7 +51,6 @@ function Invoke-WinUtilFontScaling {
         "AppEntryWidth",
         "AppEntryNameMaxWidth",
         "AppEntryNameMinHeight",
-        "AppEntrySubtitleMinHeight",
         "SearchBarWidth",
         "SearchBarHeight",
         "CustomDialogWidth",

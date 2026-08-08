@@ -13,12 +13,24 @@ Function Invoke-WinUtilCurrentSystem {
     param(
         $CheckBox
     )
+    # "Show Installed Apps" (checkbox "choco"/"winget") calls winget/choco once per app, which
+    # is slow enough to be noticeable with no feedback - report per-app progress on the same
+    # window-level indicator the install/uninstall workflows use, so it reads the same way.
+    if ($CheckBox -eq "choco" -or $checkbox -eq "winget") {
+        $appsToCheck = @($sync.configs.applicationsHashtable.GetEnumerator())
+        $totalToCheck = $appsToCheck.Count
+        $checkedCount = 0
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Checking installed apps (0/$totalToCheck)" -Percent 0
+    }
+
     if ($CheckBox -eq "choco") {
         $apps = (choco list | Select-String -Pattern "^\S+").Matches.Value
-        $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-            $packageId = ($_.Value.choco -split ";")[-1].Trim()
+        foreach ($entry in $appsToCheck) {
+            $checkedCount++
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Checking $($entry.Value.content) ($checkedCount/$totalToCheck)" -Percent ([int](($checkedCount / $totalToCheck) * 100))
+            $packageId = ($entry.Value.choco -split ";")[-1].Trim()
             if ($packageId -ne "na" -and $packageId -in $apps) {
-                Write-Output $_.Key
+                Write-Output $entry.Key
             }
         }
     }
@@ -42,13 +54,15 @@ Function Invoke-WinUtilCurrentSystem {
             # unreliable for apps that self-update outside of winget (e.g. Firefox showed up
             # only as an ARP registry key, with no "Mozilla.Firefox" id/source at all, even
             # though a targeted --id --exact lookup for it resolves correctly).
-            $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-                $packageId = (($_.Value.winget -split ";")[-1] -replace "^msstore:", "").Trim()
+            foreach ($entry in $appsToCheck) {
+                $checkedCount++
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Checking $($entry.Value.content) ($checkedCount/$totalToCheck)" -Percent ([int](($checkedCount / $totalToCheck) * 100))
+                $packageId = (($entry.Value.winget -split ";")[-1] -replace "^msstore:", "").Trim()
                 if ([string]::IsNullOrWhiteSpace($packageId) -or $packageId -eq "na") {
-                    return
+                    continue
                 }
                 if (Test-WinUtilProgramInstalled -WingetId $packageId) {
-                    Write-Output $_.Key
+                    Write-Output $entry.Key
                 }
             }
         } finally {
@@ -60,11 +74,7 @@ Function Invoke-WinUtilCurrentSystem {
     # their own checks - this runs for either package-manager preference, since $CheckBox is
     # "choco" xor "winget" per call (never both), while WSL detection isn't preference-specific.
     if ($CheckBox -eq "choco" -or $CheckBox -eq "winget") {
-        $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-            # Capture the entry before switching - inside a switch's matched-clause script
-            # blocks, $_ is rebound to the switch's own subject value, shadowing the $_ from
-            # this enclosing ForEach-Object.
-            $entry = $_
+        foreach ($entry in $appsToCheck) {
             switch ($entry.Value.installType) {
                 "wslFeature" {
                     if (Test-WinUtilWSLFeatureEnabled) { Write-Output $entry.Key }
@@ -76,6 +86,7 @@ Function Invoke-WinUtilCurrentSystem {
                 }
             }
         }
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Finished checking installed apps" -Percent 100
     }
 
     if ($CheckBox -eq "tweaks") {

@@ -5,6 +5,8 @@
         "content": "Windows Terminal",
         "description": "Modern terminal application for command-line shells like PowerShell and WSL, with tabs and profiles.",
         "link": "https://aka.ms/terminal",
+        "icon": "https://raw.githubusercontent.com/microsoft/terminal/main/res/terminal/images/Square44x44Logo.targetsize-256_altform-unplated.png",
+        "handle": "Microsoft",
         "winget": "Microsoft.WindowsTerminal",
         "foss": true
     },
@@ -14,6 +16,7 @@
         "content": "Tailscale",
         "description": "Zero-config mesh VPN built on WireGuard, useful for reaching your Channels DVR server remotely without port forwarding.",
         "link": "https://tailscale.com",
+        "handle": "Tailscale Inc.",
         "winget": "Tailscale.Tailscale",
         "foss": true
     },
@@ -23,6 +26,7 @@
         "content": "Docker Desktop",
         "description": "Docker Desktop is required to run several Channels DVR ecosystem add-ons, including Olivetin (EZ-Start).",
         "link": "https://www.docker.com/products/docker-desktop/",
+        "handle": "Docker, Inc.",
         "winget": "Docker.DockerDesktop",
         "foss": false
     },
@@ -32,6 +36,7 @@
         "content": "Node.js",
         "description": "JavaScript runtime required by npm-distributed Channels DVR tools such as Prismcast.",
         "link": "https://nodejs.org/",
+        "handle": "OpenJS Foundation",
         "winget": "OpenJS.NodeJS",
         "foss": true
     },
@@ -40,6 +45,7 @@
         "content": "WSL2",
         "description": "Windows Subsystem for Linux 2 - required to run Debian and any WSL-hosted Channels DVR add-ons. Enabling it for the first time may require a restart.",
         "link": "https://learn.microsoft.com/windows/wsl/",
+        "handle": "Microsoft",
         "installType": "wslFeature",
         "foss": true
     },
@@ -48,6 +54,7 @@
         "content": "Debian (WSL)",
         "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup.",
         "link": "https://www.debian.org/",
+        "handle": "Debian Project",
         "installType": "wslDistro",
         "distro": "Debian",
         "requires": ["wsl2"],
@@ -59,6 +66,7 @@
         "content": "Brave",
         "description": "Brave is a privacy-focused web browser that blocks ads and trackers, offering a faster and safer browsing experience.",
         "link": "https://www.brave.com",
+        "handle": "Brave Software",
         "winget": "Brave.Brave",
         "foss": true
     },
@@ -68,6 +76,7 @@
         "content": "Chrome",
         "description": "Google Chrome is a widely used web browser known for its speed, simplicity, and seamless integration with Google services.",
         "link": "https://www.google.com/chrome/",
+        "handle": "Google",
         "winget": "Google.Chrome.EXE",
         "foss": false
     },
@@ -77,6 +86,7 @@
         "content": "Firefox",
         "description": "Mozilla Firefox is an open-source web browser known for its customization options, privacy features, and extensions.",
         "link": "https://www.mozilla.org/en-US/firefox/new/",
+        "handle": "Mozilla",
         "winget": "Mozilla.Firefox",
         "foss": true
     },
@@ -86,6 +96,7 @@
         "content": "Edge",
         "description": "Microsoft Edge is a modern web browser built on Chromium, offering performance, security, and integration with Microsoft services.",
         "link": "https://www.microsoft.com/edge",
+        "handle": "Microsoft",
         "winget": "Microsoft.Edge",
         "foss": false
     },
@@ -95,6 +106,7 @@
         "content": "Vivaldi",
         "description": "Vivaldi is a highly customizable web browser with a focus on user personalization and productivity features.",
         "link": "https://vivaldi.com/",
+        "handle": "Vivaldi Technologies",
         "winget": "Vivaldi.Vivaldi",
         "foss": false
     },
@@ -148,6 +160,7 @@
         "description": "Desktop client for Channels DVR by jay3702.",
         "link": "https://github.com/jay3702/DVRDesk",
         "icon": "https://raw.githubusercontent.com/jay3702/DVRDesk/main/src-tauri/icons/icon.png",
+        "iconScale": 1.3,
         "handle": "@jay343",
         "installType": "github",
         "repo": "jay3702/DVRDesk",
@@ -222,6 +235,7 @@
         "description": "Chrome-based streaming server for Channels DVR and Plex, by hjdhjd. Requires Node.js 22+ and Google Chrome.",
         "link": "https://github.com/hjdhjd/prismcast",
         "icon": "https://raw.githubusercontent.com/hjdhjd/prismcast/main/prismcast.png",
+        "iconScale": 1.3,
         "webui": "http://localhost:5589",
         "handle": "@hjd",
         "installType": "npm",
