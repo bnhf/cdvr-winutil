@@ -4336,6 +4336,109 @@ function Invoke-WinUtilUninstallPSProfile {
     Write-Host "Successfully uninstalled CTT PowerShell Profile." -ForegroundColor Green
 }
 
+function Invoke-WinUtilWithTimeout {
+    <#
+    .SYNOPSIS
+        Runs a scriptblock with a hard time limit, returning -DefaultValue instead of
+        blocking indefinitely if it doesn't finish in time.
+
+    .DESCRIPTION
+        For wrapping external commands that can occasionally hang or run far longer than
+        normal - e.g. wsl.exe attempting to reach the Microsoft Store on a system where WSL
+        isn't installed yet (a well-documented real-world quirk, not hypothetical), or
+        Get-WindowsOptionalFeature against a slow or corrupted DISM/CBS state. Several
+        prerequisite checks that need this run synchronously on the UI thread (Resolve-
+        WinUtilPrerequisites has to, to show its modal dialog), so a hang there froze the
+        whole app rather than just delaying a background operation.
+
+        Runs the scriptblock in its own throwaway runspace (not $sync.runspace's pool - this
+        is for occasional single-shot calls, not frequent background work) so a timeout here
+        doesn't block the caller. On timeout, the still-running PowerShell instance is cleaned
+        up asynchronously in the background rather than torn down synchronously - forcibly
+        stopping some cmdlets (DISM in particular) can itself hang.
+
+    .PARAMETER ScriptBlock
+        Runs in a separate runspace - it has no access to variables/functions from the caller
+        (including $sync), only built-in cmdlets/external commands and whatever -ArgumentList
+        supplies.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [object[]]$ArgumentList = @(),
+
+        [int]$TimeoutSeconds = 8,
+
+        $DefaultValue = $null
+    )
+
+    if (-not ("WinUtilTimeoutCleanup" -as [type])) {
+        Add-Type @"
+using System;
+using System.Management.Automation;
+
+public sealed class WinUtilTimeoutCleanupState
+{
+    public PowerShell PowerShell { get; set; }
+    public IAsyncResult Handle { get; set; }
+}
+
+public static class WinUtilTimeoutCleanup
+{
+    public static readonly System.Threading.WaitOrTimerCallback Callback = Cleanup;
+
+    public static void Cleanup(object state, bool timedOut)
+    {
+        var cleanupState = state as WinUtilTimeoutCleanupState;
+        if (cleanupState == null || cleanupState.PowerShell == null || cleanupState.Handle == null)
+        {
+            return;
+        }
+
+        try
+        {
+            cleanupState.PowerShell.EndInvoke(cleanupState.Handle);
+        }
+        catch
+        {
+        }
+        finally
+        {
+            cleanupState.PowerShell.Dispose();
+        }
+    }
+}
+"@ -ErrorAction Stop
+    }
+
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript($ScriptBlock)
+    foreach ($arg in $ArgumentList) {
+        [void]$ps.AddArgument($arg)
+    }
+    $handle = $ps.BeginInvoke()
+
+    if ($handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+        try {
+            $result = $ps.EndInvoke($handle)
+            return $result
+        } catch {
+            return $DefaultValue
+        } finally {
+            $ps.Dispose()
+        }
+    }
+
+    # Timed out - don't wait on or dispose it here (could itself hang); let it finish (or
+    # not) in the background and get cleaned up once it does, via the thread pool.
+    $cleanupState = [WinUtilTimeoutCleanupState]::new()
+    $cleanupState.PowerShell = $ps
+    $cleanupState.Handle = $handle
+    [System.Threading.ThreadPool]::RegisterWaitForSingleObject($handle.AsyncWaitHandle, [WinUtilTimeoutCleanup]::Callback, $cleanupState, -1, $true) | Out-Null
+    return $DefaultValue
+}
+
 function New-WinUtilFossBadge {
     <#
         .SYNOPSIS
@@ -5970,16 +6073,27 @@ function Test-WinUtilVirtualizationFirmwareEnabled {
         this is a firmware/BIOS-UEFI setting that can't be enabled from software, so callers
         should treat this as informational for warning the user, not something to silently
         "fix" - only a definite $false should block anything, since a $null (property missing
-        on this OS build/environment) is not evidence virtualization is actually unavailable.
+        on this OS build/environment, or the query timing out below) is not evidence
+        virtualization is actually unavailable.
+
+        Bounded to a few seconds via Invoke-WinUtilWithTimeout - WMI/CIM queries can
+        occasionally hang (e.g. a corrupted WMI repository), and this is called synchronously
+        on the UI thread by Resolve-WinUtilPrerequisites (it has to, to show its modal
+        dialog), so a hang here would freeze the whole app rather than just delay a background
+        operation. A timeout returns $null (same as any other "couldn't determine" case), not
+        $false - it isn't evidence virtualization is disabled, just that this particular query
+        didn't come back in time.
     #>
-    try {
-        $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
-        if ($null -eq $cpu -or $null -eq $cpu.VirtualizationFirmwareEnabled) {
+    Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $null -ScriptBlock {
+        try {
+            $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
+            if ($null -eq $cpu -or $null -eq $cpu.VirtualizationFirmwareEnabled) {
+                return $null
+            }
+            return [bool]$cpu.VirtualizationFirmwareEnabled
+        } catch {
             return $null
         }
-        return [bool]$cpu.VirtualizationFirmwareEnabled
-    } catch {
-        return $null
     }
 }
 
@@ -5987,17 +6101,28 @@ function Test-WinUtilWSLDistroInstalled {
     <#
     .SYNOPSIS
         Returns $true if the named WSL distro is already installed.
+
+    .DESCRIPTION
+        Bounded to a few seconds via Invoke-WinUtilWithTimeout - wsl.exe exists as a stub even
+        before WSL is installed, and running it in that state can attempt to reach the
+        Microsoft Store to auto-bootstrap, which can hang for a long time on a slow/absent
+        network connection. Several callers of this run synchronously on the UI thread
+        (Resolve-WinUtilPrerequisites has to, to show its modal dialog), so a hang here froze
+        the whole app rather than just delaying a background operation.
     #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$Distro
     )
 
-    try {
-        $installed = & wsl -l -q 2>$null | ForEach-Object { $_.Trim().TrimEnd([char]0) } | Where-Object { $_ }
-        return $installed -contains $Distro
-    } catch {
-        return $false
+    Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $false -ArgumentList @($Distro) -ScriptBlock {
+        param($Distro)
+        try {
+            $installed = & wsl -l -q 2>$null | ForEach-Object { $_.Trim().TrimEnd([char]0) } | Where-Object { $_ }
+            return $installed -contains $Distro
+        } catch {
+            return $false
+        }
     }
 }
 
@@ -6020,18 +6145,24 @@ function Test-WinUtilWSLFeatureEnabled {
         Queries both features in one unfiltered call and filters the result locally, rather
         than two separate -FeatureName-filtered calls - Get-WindowsOptionalFeature is
         DISM-backed and each call can take several seconds regardless of how narrow the
-        filter is, so two calls doubles that cost. This matters because
-        Resolve-WinUtilPrerequisites calls this synchronously on the UI thread (it has to, to
-        show its modal dialog) before installing anything - two slow DISM round trips there
-        made the app appear to hang.
+        filter is, so two calls doubles that cost.
+
+        Bounded to a few seconds via Invoke-WinUtilWithTimeout on top of that - DISM/CBS can
+        occasionally take far longer than normal (a slow or partially corrupted servicing
+        state), and this matters more here than most places: Resolve-WinUtilPrerequisites
+        calls this synchronously on the UI thread (it has to, to show its modal dialog), so a
+        slow or hung DISM call there froze the whole app rather than just delaying a
+        background operation.
     #>
-    try {
-        $features = Get-WindowsOptionalFeature -Online -ErrorAction Stop
-        $wslFeature = $features | Where-Object { $_.FeatureName -eq "Microsoft-Windows-Subsystem-Linux" }
-        $vmPlatformFeature = $features | Where-Object { $_.FeatureName -eq "VirtualMachinePlatform" }
-        return $wslFeature.State -eq "Enabled" -and $vmPlatformFeature.State -eq "Enabled"
-    } catch {
-        return $false
+    Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $false -ScriptBlock {
+        try {
+            $features = Get-WindowsOptionalFeature -Online -ErrorAction Stop
+            $wslFeature = $features | Where-Object { $_.FeatureName -eq "Microsoft-Windows-Subsystem-Linux" }
+            $vmPlatformFeature = $features | Where-Object { $_.FeatureName -eq "VirtualMachinePlatform" }
+            return $wslFeature.State -eq "Enabled" -and $vmPlatformFeature.State -eq "Enabled"
+        } catch {
+            return $false
+        }
     }
 }
 

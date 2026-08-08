@@ -17,17 +17,23 @@ function Test-WinUtilWSLFeatureEnabled {
         Queries both features in one unfiltered call and filters the result locally, rather
         than two separate -FeatureName-filtered calls - Get-WindowsOptionalFeature is
         DISM-backed and each call can take several seconds regardless of how narrow the
-        filter is, so two calls doubles that cost. This matters because
-        Resolve-WinUtilPrerequisites calls this synchronously on the UI thread (it has to, to
-        show its modal dialog) before installing anything - two slow DISM round trips there
-        made the app appear to hang.
+        filter is, so two calls doubles that cost.
+
+        Bounded to a few seconds via Invoke-WinUtilWithTimeout on top of that - DISM/CBS can
+        occasionally take far longer than normal (a slow or partially corrupted servicing
+        state), and this matters more here than most places: Resolve-WinUtilPrerequisites
+        calls this synchronously on the UI thread (it has to, to show its modal dialog), so a
+        slow or hung DISM call there froze the whole app rather than just delaying a
+        background operation.
     #>
-    try {
-        $features = Get-WindowsOptionalFeature -Online -ErrorAction Stop
-        $wslFeature = $features | Where-Object { $_.FeatureName -eq "Microsoft-Windows-Subsystem-Linux" }
-        $vmPlatformFeature = $features | Where-Object { $_.FeatureName -eq "VirtualMachinePlatform" }
-        return $wslFeature.State -eq "Enabled" -and $vmPlatformFeature.State -eq "Enabled"
-    } catch {
-        return $false
+    Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $false -ScriptBlock {
+        try {
+            $features = Get-WindowsOptionalFeature -Online -ErrorAction Stop
+            $wslFeature = $features | Where-Object { $_.FeatureName -eq "Microsoft-Windows-Subsystem-Linux" }
+            $vmPlatformFeature = $features | Where-Object { $_.FeatureName -eq "VirtualMachinePlatform" }
+            return $wslFeature.State -eq "Enabled" -and $vmPlatformFeature.State -eq "Enabled"
+        } catch {
+            return $false
+        }
     }
 }

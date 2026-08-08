@@ -4,6 +4,7 @@
 
 BeforeAll {
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    . (Join-Path $script:repoRoot "functions\private\Invoke-WinUtilWithTimeout.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilWSLFeatureEnabled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilVirtualizationFirmwareEnabled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilProgramInstalled.ps1")
@@ -15,67 +16,111 @@ BeforeAll {
     function Write-WinUtilLog { }
 }
 
+# Test-WinUtilWSLFeatureEnabled and Test-WinUtilVirtualizationFirmwareEnabled now run their real
+# logic (Get-WindowsOptionalFeature / Get-CimInstance) inside Invoke-WinUtilWithTimeout's own
+# isolated [PowerShell]::Create() runspace, so Pester's Mock - which shadows functions only in
+# the runspace/scope it's running in - can no longer reach the inner cmdlets. These tests mock
+# Invoke-WinUtilWithTimeout itself instead, verifying the wrapper calls it with sane parameters
+# (a scriptblock, a bounded timeout, the right fallback default) and passes its result straight
+# through. Invoke-WinUtilWithTimeout's own correctness (executes the scriptblock, honors the
+# timeout, returns -DefaultValue on timeout/error) is covered separately below.
 Describe "Test-WinUtilWSLFeatureEnabled" {
-    It "returns true only when both required optional features are enabled" {
-        Mock Get-WindowsOptionalFeature {
-            @(
-                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
-                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
-            )
-        }
+    It "returns whatever Invoke-WinUtilWithTimeout produces" {
+        Mock Invoke-WinUtilWithTimeout { $true }
         Test-WinUtilWSLFeatureEnabled | Should -Be $true
+
+        Mock Invoke-WinUtilWithTimeout { $false }
+        Test-WinUtilWSLFeatureEnabled | Should -Be $false
     }
 
-    It "returns false when VirtualMachinePlatform is missing even if the base WSL feature is enabled" {
-        Mock Get-WindowsOptionalFeature {
-            @(
-                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
-                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Disabled" }
-            )
+    It "runs bounded by a timeout, defaulting to false rather than hanging the caller" {
+        Mock Invoke-WinUtilWithTimeout { $false }
+        Test-WinUtilWSLFeatureEnabled | Out-Null
+        Should -Invoke -CommandName Invoke-WinUtilWithTimeout -Times 1 -Exactly -ParameterFilter {
+            $DefaultValue -eq $false -and $TimeoutSeconds -gt 0 -and $TimeoutSeconds -le 30 -and $ScriptBlock -ne $null
         }
-        Test-WinUtilWSLFeatureEnabled | Should -Be $false
     }
 
-    It "returns false when the query fails" {
-        Mock Get-WindowsOptionalFeature { throw "not supported on this SKU" }
-        Test-WinUtilWSLFeatureEnabled | Should -Be $false
-    }
-
-    It "queries Get-WindowsOptionalFeature exactly once, not once per feature" {
+    It "checks both required optional features in a single Get-WindowsOptionalFeature call, not once per feature" {
         # Regression guard: Get-WindowsOptionalFeature is DISM-backed and slow regardless of
         # how narrow -FeatureName is, and Resolve-WinUtilPrerequisites calls this synchronously
         # on the UI thread - calling it once per feature made the app appear to hang while
-        # installing anything that requires WSL2 (e.g. Docker Desktop).
+        # installing anything that requires WSL2 (e.g. Docker Desktop). Runs the wrapper's real
+        # scriptblock directly (bypassing the runspace boundary) against a mocked cmdlet, since
+        # that's the only way to observe call count from inside Pester.
         Mock Get-WindowsOptionalFeature {
             @(
                 [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
                 [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
             )
         }
-        Test-WinUtilWSLFeatureEnabled | Out-Null
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
+        Test-WinUtilWSLFeatureEnabled | Should -Be $true
         Should -Invoke -CommandName Get-WindowsOptionalFeature -Times 1 -Exactly
     }
 }
 
 Describe "Test-WinUtilVirtualizationFirmwareEnabled" {
-    It "returns true when the CIM property reports enabled" {
-        Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $true } }
+    It "returns whatever Invoke-WinUtilWithTimeout produces" {
+        Mock Invoke-WinUtilWithTimeout { $true }
         Test-WinUtilVirtualizationFirmwareEnabled | Should -Be $true
-    }
 
-    It "returns false when the CIM property reports disabled" {
-        Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $false } }
+        Mock Invoke-WinUtilWithTimeout { $false }
         Test-WinUtilVirtualizationFirmwareEnabled | Should -Be $false
+
+        Mock Invoke-WinUtilWithTimeout { $null }
+        Test-WinUtilVirtualizationFirmwareEnabled | Should -BeNullOrEmpty
     }
 
-    It "returns null (not false) when the property is unavailable, rather than assuming it's disabled" {
+    It "runs bounded by a timeout, defaulting to null (unknown) rather than hanging the caller" {
+        # A timeout here must not be treated as "disabled" - only a definite $false should block
+        # anything, per Resolve-WinUtilPrerequisites' virtualization gate.
+        Mock Invoke-WinUtilWithTimeout { $null }
+        Test-WinUtilVirtualizationFirmwareEnabled | Out-Null
+        Should -Invoke -CommandName Invoke-WinUtilWithTimeout -Times 1 -Exactly -ParameterFilter {
+            $null -eq $DefaultValue -and $TimeoutSeconds -gt 0 -and $TimeoutSeconds -le 30 -and $ScriptBlock -ne $null
+        }
+    }
+
+    It "returns null (not false) when the CIM property is unavailable or the query fails, via its real scriptblock" {
+        # Runs the wrapper's real scriptblock directly (bypassing the runspace boundary) to
+        # verify the inner logic itself, since Invoke-WinUtilWithTimeout's own execution is
+        # covered separately below.
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
+
         Mock Get-CimInstance { [pscustomobject]@{ VirtualizationFirmwareEnabled = $null } }
         Test-WinUtilVirtualizationFirmwareEnabled | Should -BeNullOrEmpty
-    }
 
-    It "returns null (not false) when the CIM query itself fails" {
         Mock Get-CimInstance { throw "WMI unavailable" }
         Test-WinUtilVirtualizationFirmwareEnabled | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Invoke-WinUtilWithTimeout" {
+    It "returns the scriptblock's result when it completes within the timeout" {
+        Invoke-WinUtilWithTimeout -TimeoutSeconds 5 -ScriptBlock { 1 + 1 } | Should -Be 2
+    }
+
+    It "passes -ArgumentList through to the scriptblock" {
+        Invoke-WinUtilWithTimeout -TimeoutSeconds 5 -ArgumentList @("hello", 42) -ScriptBlock {
+            param($a, $b)
+            "$a-$b"
+        } | Should -Be "hello-42"
+    }
+
+    It "returns -DefaultValue instead of blocking when the scriptblock exceeds the timeout" {
+        $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 1 -DefaultValue "TIMED_OUT" -ScriptBlock {
+            Start-Sleep -Seconds 10
+            "SHOULD_NOT_SEE_THIS"
+        }
+        $result | Should -Be "TIMED_OUT"
+    }
+
+    It "returns -DefaultValue when the scriptblock throws" {
+        $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 5 -DefaultValue "ERROR_DEFAULT" -ScriptBlock {
+            throw "boom"
+        }
+        $result | Should -Be "ERROR_DEFAULT"
     }
 }
 
