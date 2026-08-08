@@ -44,11 +44,20 @@ function Invoke-WPFUnInstall {
         $packagesChoco = $packagesSorted['Choco']
         $packagesNpm = $packagesSorted['Npm']
 
-        # Packages whose uninstall isn't automated - WSL commands with no declared
-        # uninstallCommand, plus direct/github (arbitrary third-party installers with no known
-        # uninstaller) and the WSL feature/distro themselves (removing those is a system-wide,
-        # hard-to-reverse change well beyond "uninstall this one app" - not done implicitly).
+        # Packages whose uninstall isn't automated - direct/WSL-command packages with no
+        # declared uninstallCommand, plus github (arbitrary third-party installers with no
+        # known uninstaller) and the WSL feature/distro themselves (removing those is a
+        # system-wide, hard-to-reverse change well beyond "uninstall this one app" - not
+        # done implicitly).
         $unsupported = [System.Collections.Generic.List[string]]::new()
+        $packagesDirect = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['Direct'])) {
+            if ($p -and -not [string]::IsNullOrWhiteSpace($p.uninstallCommand)) {
+                $packagesDirect.Add($p)
+            } elseif ($p) {
+                $unsupported.Add($p.content)
+            }
+        }
         $packagesWslCommand = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['WslCommand'])) {
             if ($p -and -not [string]::IsNullOrWhiteSpace($p.uninstallCommand)) {
@@ -57,15 +66,14 @@ function Invoke-WPFUnInstall {
                 $unsupported.Add($p.content)
             }
         }
-        foreach ($p in @($packagesSorted['Direct'])) { if ($p) { $unsupported.Add($p.content) } }
         foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
         foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
         foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesWslCommand).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), wslCommand=$(@($packagesWslCommand).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -127,6 +135,21 @@ function Invoke-WPFUnInstall {
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled npm packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+            if ($packagesDirect.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling direct-install packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Uninstall-WinUtilProgramDirect -Packages $packagesDirect
+                $completedPackages += @($packagesDirect).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled direct-install packages ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }

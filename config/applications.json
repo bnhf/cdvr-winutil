@@ -83,11 +83,12 @@
     "channelsdvr": {
         "category": "Channels DVR",
         "content": "Channels DVR",
-        "description": "Channels DVR Server - the core DVR backend service. Installer is interactive - no silent-install flag is documented.",
+        "description": "Channels DVR Server - the core DVR backend service. Installer is interactive - no silent-install flag is documented. To uninstall: stop the DVR engine, then re-run the installer and choose Uninstall.",
         "link": "https://getchannels.com/dvr-server/",
         "installType": "direct",
         "url": "https://channels-dvr.s3.amazonaws.com/SetupChannelsDVR.exe",
         "args": "",
+        "uninstallViaInstaller": true,
         "foss": false
     },
     "olivetin": {
