@@ -1442,6 +1442,19 @@ Function Install-WinUtilFeatureWSL {
 }
 
 function Install-WinUtilProgramChoco {
+    <#
+    .SYNOPSIS
+        Installs or uninstalls the given choco package IDs.
+
+    .DESCRIPTION
+        Unlike winget, "choco install" is not upgrade-aware - if a package is already present,
+        it just reports "already installed" and exits 0 without changing anything, even when a
+        newer version is available. So on Install, the requested IDs are first split by current
+        install state (one batched "choco list --local-only" call, not one call per package -
+        that per-package-call pattern is exactly what caused the earlier DISM-based slowdown
+        elsewhere in this app) and already-installed IDs are routed through "choco upgrade"
+        instead, so this behaves like winget's install-or-upgrade semantics.
+    #>
     param (
         [Parameter(Mandatory=$true)]
         [ValidateSet("Install", "Uninstall")]
@@ -1451,18 +1464,59 @@ function Install-WinUtilProgramChoco {
         [string[]]$Programs
     )
 
-    if ($Action -eq 'Install') {
-        $arguments = "install $Programs -y"
-    } else {
+    if ($Action -eq 'Uninstall') {
         $arguments = "uninstall $Programs -y"
+        Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s): $($Programs -join ', ')"
+        $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s) completed: $($Programs -join ', ')"
+        } else {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Uninstall choco package(s) FAILED: $($Programs -join ', ') (exit code: $($process.ExitCode))"
+        }
+        return
     }
 
-    Write-WinUtilLog -Component "Package" -Message "$Action choco package(s): $($Programs -join ', ')"
-    $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-    if ($process.ExitCode -eq 0) {
-        Write-WinUtilLog -Component "Package" -Message "$Action choco package(s) completed: $($Programs -join ', ')"
-    } else {
-        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$Action choco package(s) FAILED: $($Programs -join ', ') (exit code: $($process.ExitCode))"
+    $installedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    try {
+        $localList = & choco list --local-only --limit-output 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($line in $localList) {
+                # --limit-output gives "id|version" per line, with no header/footer noise to
+                # accidentally match against.
+                $id = ($line -split '\|')[0].Trim()
+                if (-not [string]::IsNullOrWhiteSpace($id)) {
+                    [void]$installedIds.Add($id)
+                }
+            }
+        }
+    } catch {}
+    # If the local-package query itself failed, $installedIds stays empty and everything below
+    # falls through to "choco install" - the same no-op-if-already-installed behavior as before,
+    # not a regression.
+
+    $toInstall = @($Programs | Where-Object { -not $installedIds.Contains($_) })
+    $toUpgrade = @($Programs | Where-Object { $installedIds.Contains($_) })
+
+    if ($toInstall.Count -gt 0) {
+        $arguments = "install $toInstall -y"
+        Write-WinUtilLog -Component "Package" -Message "Install choco package(s): $($toInstall -join ', ')"
+        $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            Write-WinUtilLog -Component "Package" -Message "Install choco package(s) completed: $($toInstall -join ', ')"
+        } else {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Install choco package(s) FAILED: $($toInstall -join ', ') (exit code: $($process.ExitCode))"
+        }
+    }
+
+    if ($toUpgrade.Count -gt 0) {
+        $arguments = "upgrade $toUpgrade -y"
+        Write-WinUtilLog -Component "Package" -Message "Upgrade already-installed choco package(s): $($toUpgrade -join ', ')"
+        $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            Write-WinUtilLog -Component "Package" -Message "Upgrade choco package(s) completed: $($toUpgrade -join ', ')"
+        } else {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Upgrade choco package(s) FAILED: $($toUpgrade -join ', ') (exit code: $($process.ExitCode))"
+        }
     }
 }
 

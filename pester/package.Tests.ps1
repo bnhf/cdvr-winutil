@@ -149,7 +149,13 @@ Describe "Install-WinUtilProgramChoco" {
         Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
     }
 
-    It "starts choco with install arguments" {
+    It "installs packages that aren't already present" {
+        function choco { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+        Mock choco {
+            $global:LASTEXITCODE = 0
+            @()
+        }
+
         Install-WinUtilProgramChoco -Action Install -Programs @("git", "vlc")
 
         Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
@@ -158,6 +164,58 @@ Describe "Install-WinUtilProgramChoco" {
                 $NoNewWindow -eq $true -and
                 $Wait -eq $true -and
                 $PassThru -eq $true
+        }
+    }
+
+    It "upgrades packages that are already installed instead of no-op'ing via install" {
+        # Regression guard: "choco install" on an already-installed package silently does
+        # nothing (exit 0, no upgrade) even when a newer version is available - unlike winget,
+        # which upgrades automatically. This must route already-installed IDs through
+        # "choco upgrade" instead.
+        function choco { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+        Mock choco {
+            $global:LASTEXITCODE = 0
+            @("git|2.43.0", "vlc|3.0.20")
+        }
+
+        Install-WinUtilProgramChoco -Action Install -Programs @("git", "vlc")
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "choco" -and $ArgumentList -eq "upgrade git vlc -y"
+        }
+        Should -Invoke -CommandName Start-Process -Times 0 -Exactly -ParameterFilter {
+            $FilePath -eq "choco" -and ([string]$ArgumentList).StartsWith("install")
+        }
+    }
+
+    It "splits a mixed selection into an install batch and an upgrade batch" {
+        function choco { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+        Mock choco {
+            $global:LASTEXITCODE = 0
+            @("git|2.43.0")
+        }
+
+        Install-WinUtilProgramChoco -Action Install -Programs @("git", "vlc")
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "choco" -and $ArgumentList -eq "install vlc -y"
+        }
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "choco" -and $ArgumentList -eq "upgrade git -y"
+        }
+    }
+
+    It "falls back to installing everything when the local-package query fails" {
+        function choco { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+        Mock choco {
+            $global:LASTEXITCODE = 1
+            @()
+        }
+
+        Install-WinUtilProgramChoco -Action Install -Programs @("git", "vlc")
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "choco" -and $ArgumentList -eq "install git vlc -y"
         }
     }
 
