@@ -326,6 +326,29 @@ Describe "Invoke-WPFInstall runspace body" {
         Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
     }
 
+    It "runs postInstallCommand after a package installs successfully via choco too" {
+        # Regression guard: Docker Desktop declares both .winget and .choco (the user can
+        # prefer either package manager), and its own engine doesn't start until launched at
+        # least once after install - postInstallCommand needs to fire regardless of which
+        # manager actually performed the install, not just winget.
+        $dockerPackage = [pscustomobject]@{ Key = "dockerdesktop"; content = "Docker Desktop"; winget = "Docker.DockerDesktop"; choco = "docker-desktop"; postInstallCommand = 'Set-Variable -Name postInstallRan -Value $true -Scope Script' }
+        New-WinUtilInstallTestContext -Packages @($dockerPackage)
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Winget @() -Choco @("docker-desktop")
+        }
+        Mock Install-WinUtilProgramChoco { @([pscustomobject]@{ Program = "docker-desktop"; Success = $true; ExitCode = 0 }) }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($dockerPackage) -ManagerPreference "Choco"
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Message -like "Running post-install step for Docker Desktop*"
+        }
+        $script:postInstallRan | Should -BeTrue
+
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+    }
+
     It "installs WSL2/Debian before winget/choco, so Docker Desktop doesn't try to install before its own WSL2 prerequisite is even enabled" {
         Mock Get-WinUtilSelectedPackages {
             $split = New-WinUtilPackageSplit -Winget @("Docker.DockerDesktop") -Choco @()
