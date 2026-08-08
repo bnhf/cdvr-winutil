@@ -11,7 +11,10 @@ function Test-WinUtilProgramInstalled {
 
     if (-not [string]::IsNullOrWhiteSpace($WingetId) -and $WingetId -ne "na") {
         try {
-            $result = & winget list --id $WingetId --accept-source-agreements --disable-interactivity 2>&1
+            # --exact matters here: without it, winget does fuzzy prefix matching and can
+            # silently resolve to a different, unrelated package (e.g. "Google.Chrome" fuzzy-
+            # matched "Google.Chrome.Beta.EXE" and reported its version info instead).
+            $result = & winget list --id $WingetId --exact --accept-source-agreements --disable-interactivity 2>&1
             if ($LASTEXITCODE -eq 0 -and (($result -join "`n") -match [regex]::Escape($WingetId))) {
                 return $true
             }

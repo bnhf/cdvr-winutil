@@ -7,6 +7,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 BeforeAll {
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
     . (Join-Path $script:repoRoot "functions\private\Invoke-WinUtilCurrentSystem.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Test-WinUtilProgramInstalled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Set-WinUtilRegistry.ps1")
     . (Join-Path $script:repoRoot "functions\private\Set-WinUtilService.ps1")
 
@@ -16,6 +17,8 @@ BeforeAll {
     function choco {
         param([Parameter(ValueFromRemainingArguments = $true)]$Arguments)
     }
+    function Test-WinUtilWSLFeatureEnabled { $false }
+    function Test-WinUtilWSLDistroInstalled { param($Distro) $false }
     function Write-WinUtilLog { }
 }
 
@@ -31,25 +34,33 @@ Describe "Invoke-WinUtilCurrentSystem installed apps" {
             }
         })
 
+        # Per-app targeted lookups: Invoke-WinUtilCurrentSystem now calls
+        # "winget list --id <id> --exact ..." once per app (via Test-WinUtilProgramInstalled)
+        # instead of one bulk "winget list" scanned with a regex, since the bulk listing's
+        # Id/Source columns are unreliable for apps that self-update outside of winget.
         Mock winget {
+            $script:wingetCalls += , @($Arguments)
+            $ArgumentsList = @($Arguments)
+            $idIndex = [array]::IndexOf($ArgumentsList, "--id")
+            $requestedId = if ($idIndex -ge 0) { $ArgumentsList[$idIndex + 1] } else { $null }
+
             $global:LASTEXITCODE = 0
-            $script:wingetArguments = @($Arguments)
-            @(
-                "Name  Id  Version  Source",
-                "--------------------------------",
-                "Git  Git.Git  2.0  winget",
-                "ChatGPT  9NT1R1C2HH7J  1.0  msstore"
-            )
+            switch ($requestedId) {
+                "Git.Git" { return @("Name  Id  Version  Source", "----", "Git  Git.Git  2.0  winget") }
+                "9NT1R1C2HH7J" { return @("Name  Id  Version  Source", "----", "ChatGPT  9NT1R1C2HH7J  1.0  msstore") }
+                default { return @("No installed package found matching input criteria.") }
+            }
         }
         Mock choco {
             $script:chocoArguments = @($Arguments)
             @("Chocolatey v2", "git 2.0", "2 packages installed.")
         }
+        $script:wingetCalls = @()
     }
 
     AfterEach {
         Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
-        Remove-Variable -Name wingetArguments -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name wingetCalls -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name chocoArguments -Scope Script -ErrorAction SilentlyContinue
     }
 
@@ -60,8 +71,11 @@ Describe "Invoke-WinUtilCurrentSystem installed apps" {
         $result | Should -Contain "WPFInstallGit"
         $result | Should -Contain "WPFInstallChatGPT"
         $result | Should -Not -Contain "WPFInstallMissing"
-        Should -Invoke -CommandName winget -Times 1 -Exactly
-        $script:wingetArguments | Should -Be @("list", "--accept-source-agreements", "--disable-interactivity")
+        # 1 upfront sanity check + 1 targeted --id --exact lookup per app with a winget id
+        Should -Invoke -CommandName winget -Times 4 -Exactly
+        $script:wingetCalls | Where-Object { $_ -contains "--id" -and $_ -contains "Git.Git" } | Should -HaveCount 1
+        $script:wingetCalls | Where-Object { $_ -contains "--id" -and $_ -contains "9NT1R1C2HH7J" } | Should -HaveCount 1
+        $script:wingetCalls | Where-Object { $_ -contains "--id" -and $_ -contains "Git" } | Should -HaveCount 1
     }
 
     It "fails promptly when Winget cannot list applications" {
@@ -79,6 +93,51 @@ Describe "Invoke-WinUtilCurrentSystem installed apps" {
         $result | Should -Be @("WPFInstallGit")
         Should -Invoke -CommandName choco -Times 1 -Exactly
         $script:chocoArguments | Should -Be @("list")
+    }
+}
+
+Describe "Invoke-WinUtilCurrentSystem WSL detection" {
+    BeforeEach {
+        $script:sync = [Hashtable]::Synchronized(@{
+            configs = [pscustomobject]@{
+                applicationsHashtable = @{
+                    WPFInstallwsl2 = [pscustomobject]@{ installType = "wslFeature" }
+                    WPFInstalldebian = [pscustomobject]@{ installType = "wslDistro"; distro = "Debian" }
+                    WPFInstallubuntu = [pscustomobject]@{ installType = "wslDistro"; distro = "Ubuntu" }
+                }
+            }
+        })
+        Mock winget {
+            $global:LASTEXITCODE = 0
+            @("No installed package found matching input criteria.")
+        }
+        Mock choco { @() }
+    }
+
+    AfterEach {
+        Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "detects an enabled WSL feature and an installed distro, independent of package-manager preference" {
+        Mock Test-WinUtilWSLFeatureEnabled { $true }
+        Mock Test-WinUtilWSLDistroInstalled { param($Distro) $Distro -eq "Debian" }
+
+        $wingetResult = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+        $wingetResult | Should -Contain "WPFInstallwsl2"
+        $wingetResult | Should -Contain "WPFInstalldebian"
+        $wingetResult | Should -Not -Contain "WPFInstallubuntu"
+
+        $chocoResult = @(Invoke-WinUtilCurrentSystem -CheckBox "choco")
+        $chocoResult | Should -Contain "WPFInstallwsl2"
+        $chocoResult | Should -Contain "WPFInstalldebian"
+    }
+
+    It "reports nothing when the WSL feature and distros are absent" {
+        Mock Test-WinUtilWSLFeatureEnabled { $false }
+        Mock Test-WinUtilWSLDistroInstalled { $false }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+        $result | Should -BeNullOrEmpty
     }
 }
 

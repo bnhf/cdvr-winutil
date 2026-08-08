@@ -1928,24 +1928,53 @@ Function Invoke-WinUtilCurrentSystem {
         $originalEncoding = [Console]::OutputEncoding
         try {
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-            $installedProgramOutput = @(winget list --accept-source-agreements --disable-interactivity 2>&1)
+
+            # Cheap upfront sanity check so a broken winget (missing, corrupted sources, ...)
+            # fails loudly here instead of silently, since the per-app lookups below each
+            # swallow their own errors (Test-WinUtilProgramInstalled returns $false on any
+            # failure) and would otherwise just look like "nothing is installed".
+            $null = winget list --count 1 --accept-source-agreements --disable-interactivity 2>&1
             if ($LASTEXITCODE -ne 0) {
                 throw "winget list failed with exit code $LASTEXITCODE."
+            }
+
+            # Per-app targeted "winget list --id <id> --exact" lookups instead of one bulk
+            # "winget list" scanned with a regex: the bulk listing's Id/Source columns are
+            # unreliable for apps that self-update outside of winget (e.g. Firefox showed up
+            # only as an ARP registry key, with no "Mozilla.Firefox" id/source at all, even
+            # though a targeted --id --exact lookup for it resolves correctly).
+            $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
+                $packageId = (($_.Value.winget -split ";")[-1] -replace "^msstore:", "").Trim()
+                if ([string]::IsNullOrWhiteSpace($packageId) -or $packageId -eq "na") {
+                    return
+                }
+                if (Test-WinUtilProgramInstalled -WingetId $packageId) {
+                    Write-Output $_.Key
+                }
             }
         } finally {
             [Console]::OutputEncoding = $originalEncoding
         }
-        $installedProgramText = $installedProgramOutput -join "`n"
+    }
 
+    # WSL-based entries (wslFeature/wslDistro) carry no winget/choco id at all, so they need
+    # their own checks - this runs for either package-manager preference, since $CheckBox is
+    # "choco" xor "winget" per call (never both), while WSL detection isn't preference-specific.
+    if ($CheckBox -eq "choco" -or $CheckBox -eq "winget") {
         $sync.configs.applicationsHashtable.GetEnumerator() | ForEach-Object {
-            $packageId = (($_.Value.winget -split ";")[-1] -replace "^msstore:", "").Trim()
-            if ([string]::IsNullOrWhiteSpace($packageId) -or $packageId -eq "na") {
-                return
-            }
-
-            $packagePattern = "(?im)[^\S\r\n]{2,}$([regex]::Escape($packageId))(?=[^\S\r\n]{2,}|$)"
-            if ($installedProgramText -match $packagePattern) {
-                Write-Output $_.Key
+            # Capture the entry before switching - inside a switch's matched-clause script
+            # blocks, $_ is rebound to the switch's own subject value, shadowing the $_ from
+            # this enclosing ForEach-Object.
+            $entry = $_
+            switch ($entry.Value.installType) {
+                "wslFeature" {
+                    if (Test-WinUtilWSLFeatureEnabled) { Write-Output $entry.Key }
+                }
+                "wslDistro" {
+                    if ($entry.Value.distro -and (Test-WinUtilWSLDistroInstalled -Distro $entry.Value.distro)) {
+                        Write-Output $entry.Key
+                    }
+                }
             }
         }
     }
@@ -5643,7 +5672,10 @@ function Test-WinUtilProgramInstalled {
 
     if (-not [string]::IsNullOrWhiteSpace($WingetId) -and $WingetId -ne "na") {
         try {
-            $result = & winget list --id $WingetId --accept-source-agreements --disable-interactivity 2>&1
+            # --exact matters here: without it, winget does fuzzy prefix matching and can
+            # silently resolve to a different, unrelated package (e.g. "Google.Chrome" fuzzy-
+            # matched "Google.Chrome.Beta.EXE" and reported its version info instead).
+            $result = & winget list --id $WingetId --exact --accept-source-agreements --disable-interactivity 2>&1
             if ($LASTEXITCODE -eq 0 -and (($result -join "`n") -match [regex]::Escape($WingetId))) {
                 return $true
             }
@@ -8536,7 +8568,7 @@ $sync.configs.applications = @'
     "content": "Chrome",
     "description": "Google Chrome is a widely used web browser known for its speed, simplicity, and seamless integration with Google services.",
     "link": "https://www.google.com/chrome/",
-    "winget": "Google.Chrome",
+    "winget": "Google.Chrome.EXE",
     "foss": false
   },
   "WPFInstallfirefox": {
