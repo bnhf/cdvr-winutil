@@ -2,10 +2,18 @@ Function Uninstall-WinUtilFeatureWSL {
     <#
     .SYNOPSIS
         Uninstalls the WSL2 platform: after confirming with the user, stops and unregisters
-        the distro(s) WinUtil's own catalog manages (e.g. Debian) that are actually currently
-        registered, then runs "wsl --uninstall".
+        any distro(s) WinUtil's own catalog manages (installType "wslDistro") that are actually
+        currently registered, then runs "wsl --uninstall".
 
     .DESCRIPTION
+        No catalog entry currently declares installType "wslDistro" - Debian moved to a normal
+        winget install (Debian.Debian) after "wsl --install -d Debian" was confirmed to hang
+        waiting on its interactive first-run OOBE prompt, even from a genuinely interactive
+        terminal, which switching install mechanisms couldn't fix. This unregister/confirm path
+        (and the sibling Install-WinUtilWSLDistro.ps1/Uninstall-WinUtilWSLDistro.ps1) is left in
+        place rather than removed, in case a future catalog entry needs it for a distro that
+        isn't separately available via winget.
+
         Only ever unregisters distros declared in WinUtil's own catalog (installType
         "wslDistro") - never anything else that might be registered on this machine, since that
         data isn't ours to delete. Unregistering permanently deletes that distro's filesystem,
@@ -53,7 +61,11 @@ Function Uninstall-WinUtilFeatureWSL {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still uninstalling WSL2 ($($elapsedSeconds)s elapsed)."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL2 ($($elapsedSeconds)s elapsed)..."
+        } -ScriptBlock {
             try {
                 & wsl --shutdown 2>&1 | Out-Null
                 return (& wsl --uninstall 2>&1 | Out-String).Trim()

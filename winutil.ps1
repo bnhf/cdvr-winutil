@@ -1444,7 +1444,11 @@ Function Install-WinUtilFeatureWSL {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still enabling WSL2 ($($elapsedSeconds)s elapsed) - this can take a while."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
+        } -ScriptBlock {
             try {
                 return (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
             } catch {
@@ -2003,7 +2007,11 @@ Function Install-WinUtilWSLCommand {
         try {
             Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
 
-            $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -ScriptBlock {
+            $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -OnWaitingIntervalSeconds 20 -OnWaiting {
+                param($elapsedSeconds)
+                Write-WinUtilLog -Component "Package" -Message "Still running $name $($Action.ToLower()) inside WSL ($($elapsedSeconds)s elapsed) - this can take a while."
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..."
+            } -ScriptBlock {
                 param($distro, $scriptName)
                 try {
                     return (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
@@ -2029,9 +2037,17 @@ Function Install-WinUtilWSLCommand {
 Function Install-WinUtilWSLDistro {
     <#
     .SYNOPSIS
-        Installs a WSL distro (e.g. Debian). Requires the WSL2 feature to already be enabled.
+        Installs a WSL distro via "wsl --install -d <distro>". Requires the WSL2 feature to
+        already be enabled.
 
     .DESCRIPTION
+        No catalog entry currently uses this (installType "wslDistro") - Debian, the original
+        user, moved to a normal winget install (Debian.Debian) after the hang described below
+        was confirmed to also happen from a genuinely interactive terminal (not just this app's
+        background runspace), meaning the install mechanism wasn't actually the cause. Left in
+        place rather than removed, in case a future catalog entry needs a distro that isn't
+        separately available via winget.
+
         Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
         used elsewhere for quick DISM/registry checks - downloading and registering a distro's
         filesystem image genuinely takes a while, and "wsl --install -d <distro>" can hang well
@@ -2044,6 +2060,11 @@ Function Install-WinUtilWSLDistro {
         Verifies success afterward via Test-WinUtilWSLDistroInstalled rather than trusting
         wsl.exe's own exit behavior, for the same reason - a timeout here isn't necessarily a
         real failure, the distro may already be fully registered underneath it.
+
+        Logs a periodic "still working" update via -OnWaiting while the install runs - the
+        confirmed real case above produced zero console/progress feedback for its full 5-minute
+        wait despite genuinely succeeding, which read as a stalled/broken app rather than a
+        slow-but-working one.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -2061,7 +2082,11 @@ Function Install-WinUtilWSLDistro {
 
         Write-WinUtilLog -Component "Package" -Message "Installing WSL distro $distro ($name)"
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro) -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still installing WSL distro $distro ($($elapsedSeconds)s elapsed) - this can take several minutes, especially on a first install."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..."
+        } -ScriptBlock {
             param($distro)
             try {
                 return (& wsl --install -d $distro 2>&1 | Out-String).Trim()
@@ -2077,7 +2102,7 @@ Function Install-WinUtilWSLDistro {
         }
 
         if (Test-WinUtilWSLDistroInstalled -Distro $distro) {
-            Write-WinUtilLog -Component "Package" -Message "$name ($distro) is installed and registered. If this was its first install, open a terminal and run `"wsl -d $distro`" once to finish creating its Linux user account."
+            Write-WinUtilLog -Component "Package" -Message "$name ($distro) is installed and registered. If this was its first install, launch it once from the Start Menu (not via `"wsl -d $distro`" in an existing terminal - confirmed live to hang waiting on the interactive first-run prompt even there) to finish creating its Linux user account."
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$name ($distro) does not appear to be registered after the install attempt."
         }
@@ -4556,6 +4581,19 @@ function Invoke-WinUtilWithTimeout {
         Runs in a separate runspace - it has no access to variables/functions from the caller
         (including $sync), only built-in cmdlets/external commands and whatever -ArgumentList
         supplies.
+
+    .PARAMETER OnWaiting
+        Optional. For long timeouts (e.g. a multi-minute distro download) where silently
+        blocking the whole wait looks indistinguishable from a genuine hang - confirmed live: a
+        WSL distro install that was actually working (and did finish successfully) produced no
+        console/progress feedback for its full 5-minute timeout window, and was reported as
+        looking stalled. Unlike -ScriptBlock, this runs in the CALLING runspace/scope (it isn't
+        passed into the isolated PowerShell instance), so it has normal access to things like
+        Write-WinUtilLog or Set-WinUtilTweaksProgressIndicator. Called every -OnWaitingIntervalSeconds
+        while still waiting, with the elapsed seconds so far as its argument. A caller that
+        doesn't supply this gets the exact same single-wait behavior as before - the wait is
+        internally chunked either way, but chunking with nothing to call between chunks is
+        behaviorally identical to one long wait.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -4565,7 +4603,11 @@ function Invoke-WinUtilWithTimeout {
 
         [int]$TimeoutSeconds = 8,
 
-        $DefaultValue = $null
+        $DefaultValue = $null,
+
+        [scriptblock]$OnWaiting,
+
+        [int]$OnWaitingIntervalSeconds = 15
     )
 
     if (-not ("WinUtilTimeoutCleanup" -as [type])) {
@@ -4614,7 +4656,21 @@ public static class WinUtilTimeoutCleanup
     }
     $handle = $ps.BeginInvoke()
 
-    if ($handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+    $elapsedSeconds = 0
+    $completed = $false
+    while ($elapsedSeconds -lt $TimeoutSeconds) {
+        $waitChunk = [Math]::Min($OnWaitingIntervalSeconds, $TimeoutSeconds - $elapsedSeconds)
+        if ($handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($waitChunk))) {
+            $completed = $true
+            break
+        }
+        $elapsedSeconds += $waitChunk
+        if ($OnWaiting) {
+            try { & $OnWaiting $elapsedSeconds } catch {}
+        }
+    }
+
+    if ($completed) {
         try {
             $result = $ps.EndInvoke($handle)
             return $result
@@ -6424,10 +6480,18 @@ Function Uninstall-WinUtilFeatureWSL {
     <#
     .SYNOPSIS
         Uninstalls the WSL2 platform: after confirming with the user, stops and unregisters
-        the distro(s) WinUtil's own catalog manages (e.g. Debian) that are actually currently
-        registered, then runs "wsl --uninstall".
+        any distro(s) WinUtil's own catalog manages (installType "wslDistro") that are actually
+        currently registered, then runs "wsl --uninstall".
 
     .DESCRIPTION
+        No catalog entry currently declares installType "wslDistro" - Debian moved to a normal
+        winget install (Debian.Debian) after "wsl --install -d Debian" was confirmed to hang
+        waiting on its interactive first-run OOBE prompt, even from a genuinely interactive
+        terminal, which switching install mechanisms couldn't fix. This unregister/confirm path
+        (and the sibling Install-WinUtilWSLDistro.ps1/Uninstall-WinUtilWSLDistro.ps1) is left in
+        place rather than removed, in case a future catalog entry needs it for a distro that
+        isn't separately available via winget.
+
         Only ever unregisters distros declared in WinUtil's own catalog (installType
         "wslDistro") - never anything else that might be registered on this machine, since that
         data isn't ours to delete. Unregistering permanently deletes that distro's filesystem,
@@ -6475,7 +6539,11 @@ Function Uninstall-WinUtilFeatureWSL {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still uninstalling WSL2 ($($elapsedSeconds)s elapsed)."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL2 ($($elapsedSeconds)s elapsed)..."
+        } -ScriptBlock {
             try {
                 & wsl --shutdown 2>&1 | Out-Null
                 return (& wsl --uninstall 2>&1 | Out-String).Trim()
@@ -6635,7 +6703,11 @@ Function Uninstall-WinUtilWSLDistro {
 
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still unregistering WSL distro $distro ($($elapsedSeconds)s elapsed)."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Unregistering $name ($($elapsedSeconds)s elapsed)..."
+        } -ScriptBlock {
             param($distro)
             try {
                 & wsl --terminate $distro 2>&1 | Out-Null
@@ -9697,11 +9769,10 @@ $sync.configs.applications = @'
   "WPFInstalldebian": {
     "category": "Foundational",
     "content": "Debian (WSL)",
-    "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup.",
+    "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup. After installing, launch it once from the Start Menu (not via \"wsl -d Debian\" in an existing terminal) to finish creating its Linux user account - that first-run step needs a real interactive console.",
     "link": "https://www.debian.org/",
     "handle": "Debian Project",
-    "installType": "wslDistro",
-    "distro": "Debian",
+    "winget": "Debian.Debian",
     "requires": [
       "wsl2"
     ],

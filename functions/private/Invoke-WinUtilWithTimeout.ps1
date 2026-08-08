@@ -23,6 +23,19 @@ function Invoke-WinUtilWithTimeout {
         Runs in a separate runspace - it has no access to variables/functions from the caller
         (including $sync), only built-in cmdlets/external commands and whatever -ArgumentList
         supplies.
+
+    .PARAMETER OnWaiting
+        Optional. For long timeouts (e.g. a multi-minute distro download) where silently
+        blocking the whole wait looks indistinguishable from a genuine hang - confirmed live: a
+        WSL distro install that was actually working (and did finish successfully) produced no
+        console/progress feedback for its full 5-minute timeout window, and was reported as
+        looking stalled. Unlike -ScriptBlock, this runs in the CALLING runspace/scope (it isn't
+        passed into the isolated PowerShell instance), so it has normal access to things like
+        Write-WinUtilLog or Set-WinUtilTweaksProgressIndicator. Called every -OnWaitingIntervalSeconds
+        while still waiting, with the elapsed seconds so far as its argument. A caller that
+        doesn't supply this gets the exact same single-wait behavior as before - the wait is
+        internally chunked either way, but chunking with nothing to call between chunks is
+        behaviorally identical to one long wait.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -32,7 +45,11 @@ function Invoke-WinUtilWithTimeout {
 
         [int]$TimeoutSeconds = 8,
 
-        $DefaultValue = $null
+        $DefaultValue = $null,
+
+        [scriptblock]$OnWaiting,
+
+        [int]$OnWaitingIntervalSeconds = 15
     )
 
     if (-not ("WinUtilTimeoutCleanup" -as [type])) {
@@ -81,7 +98,21 @@ public static class WinUtilTimeoutCleanup
     }
     $handle = $ps.BeginInvoke()
 
-    if ($handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+    $elapsedSeconds = 0
+    $completed = $false
+    while ($elapsedSeconds -lt $TimeoutSeconds) {
+        $waitChunk = [Math]::Min($OnWaitingIntervalSeconds, $TimeoutSeconds - $elapsedSeconds)
+        if ($handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($waitChunk))) {
+            $completed = $true
+            break
+        }
+        $elapsedSeconds += $waitChunk
+        if ($OnWaiting) {
+            try { & $OnWaiting $elapsedSeconds } catch {}
+        }
+    }
+
+    if ($completed) {
         try {
             $result = $ps.EndInvoke($handle)
             return $result

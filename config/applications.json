@@ -74,11 +74,10 @@
     "debian": {
         "category": "Foundational",
         "content": "Debian (WSL)",
-        "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup.",
+        "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup. After installing, launch it once from the Start Menu (not via \"wsl -d Debian\" in an existing terminal) to finish creating its Linux user account - that first-run step needs a real interactive console.",
         "link": "https://www.debian.org/",
         "handle": "Debian Project",
-        "installType": "wslDistro",
-        "distro": "Debian",
+        "winget": "Debian.Debian",
         "requires": ["wsl2"],
         "foss": true
     },

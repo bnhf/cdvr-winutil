@@ -25,7 +25,11 @@ Function Install-WinUtilFeatureWSL {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still enabling WSL2 ($($elapsedSeconds)s elapsed) - this can take a while."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
+        } -ScriptBlock {
             try {
                 return (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
             } catch {

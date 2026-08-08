@@ -37,7 +37,11 @@ Function Uninstall-WinUtilWSLDistro {
 
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
 
-        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -ScriptBlock {
+        $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
+            param($elapsedSeconds)
+            Write-WinUtilLog -Component "Package" -Message "Still unregistering WSL distro $distro ($($elapsedSeconds)s elapsed)."
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Unregistering $name ($($elapsedSeconds)s elapsed)..."
+        } -ScriptBlock {
             param($distro)
             try {
                 & wsl --terminate $distro 2>&1 | Out-Null

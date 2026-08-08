@@ -198,6 +198,47 @@ Describe "Invoke-WinUtilWithTimeout" {
         }
         $result | Should -Be "ERROR_DEFAULT"
     }
+
+    It "calls -OnWaiting periodically while a long-running scriptblock is still in progress" {
+        # Regression guard for a real report: a WSL distro install that was genuinely working
+        # (and did finish successfully) produced zero console/progress feedback for its full
+        # 5-minute timeout window, reading as a stalled/broken app rather than a slow-but-working
+        # one. -OnWaiting exists so long-running callers can surface periodic "still working"
+        # feedback instead of one long silence.
+        $script:pings = [System.Collections.Generic.List[int]]::new()
+        $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 6 -OnWaitingIntervalSeconds 2 -DefaultValue "TIMED_OUT" -OnWaiting {
+            param($elapsedSeconds)
+            $script:pings.Add($elapsedSeconds)
+        } -ScriptBlock {
+            Start-Sleep -Seconds 20
+            "SHOULD_NOT_SEE_THIS"
+        }
+
+        $result | Should -Be "TIMED_OUT"
+        @($script:pings) | Should -Be @(2, 4, 6)
+
+        Remove-Variable -Name pings -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "stops calling -OnWaiting once the scriptblock completes, and still returns its real result" {
+        $script:pings2 = [System.Collections.Generic.List[int]]::new()
+        $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 10 -OnWaitingIntervalSeconds 2 -OnWaiting {
+            param($elapsedSeconds)
+            $script:pings2.Add($elapsedSeconds)
+        } -ScriptBlock {
+            Start-Sleep -Seconds 5
+            "DONE"
+        }
+
+        $result | Should -Be "DONE"
+        @($script:pings2) | Should -Be @(2, 4)
+
+        Remove-Variable -Name pings2 -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "behaves exactly as before for callers that don't supply -OnWaiting" {
+        Invoke-WinUtilWithTimeout -TimeoutSeconds 5 -ScriptBlock { 1 + 1 } | Should -Be 2
+    }
 }
 
 Describe "Resolve-WinUtilPrerequisites virtualization gate" {
