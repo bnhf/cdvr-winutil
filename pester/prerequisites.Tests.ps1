@@ -50,6 +50,31 @@ Describe "Test-WinUtilWSLFeatureEnabled" {
         }
     }
 
+    It "returns false without querying DISM when WSL2 was uninstalled through WinUtil this session" {
+        # Regression guard for a real report: "wsl --uninstall" deliberately does not disable
+        # the underlying Microsoft-Windows-Subsystem-Linux/VirtualMachinePlatform optional
+        # features, so DISM alone would still say "Enabled" right after uninstalling WSL2
+        # through WinUtil - incorrectly treating it as already usable and skipping the
+        # restart-required gate for anything selected afterward in the same app session.
+        $script:sync = [Hashtable]::Synchronized(@{ WSLRuntimeUninstalled = $true })
+        Mock Invoke-WinUtilWithTimeout { $true }
+
+        Test-WinUtilWSLFeatureEnabled | Should -Be $false
+        Should -Invoke -CommandName Invoke-WinUtilWithTimeout -Times 0 -Exactly
+
+        Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "falls through to the real DISM-backed check when the session flag is absent or false" {
+        $script:sync = [Hashtable]::Synchronized(@{ WSLRuntimeUninstalled = $false })
+        Mock Invoke-WinUtilWithTimeout { $true }
+
+        Test-WinUtilWSLFeatureEnabled | Should -Be $true
+        Should -Invoke -CommandName Invoke-WinUtilWithTimeout -Times 1 -Exactly
+
+        Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
+    }
+
     It "checks both required optional features in a single Get-WindowsOptionalFeature call, not once per feature" {
         # Regression guard: Get-WindowsOptionalFeature is DISM-backed and slow regardless of
         # how narrow -FeatureName is, and Resolve-WinUtilPrerequisites calls this synchronously

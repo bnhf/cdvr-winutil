@@ -1435,6 +1435,10 @@ Function Install-WinUtilFeatureWSL {
             $output = (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
             Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install completed with no console output)" })
             Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: if this is the first time WSL has been enabled on this machine, a restart may be required before it is usable."
+            # Clears the "uninstalled this session" flag Uninstall-WinUtilFeatureWSL sets, so
+            # Test-WinUtilWSLFeatureEnabled goes back to trusting the real DISM/optional-feature
+            # state now that WSL2 has been (re)installed.
+            if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $false }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to enable WSL: $_"
         }
@@ -6289,7 +6293,21 @@ function Test-WinUtilWSLFeatureEnabled {
         calls this synchronously on the UI thread (it has to, to show its modal dialog), so a
         slow or hung DISM call there froze the whole app rather than just delaying a
         background operation.
+
+        Checks $sync.WSLRuntimeUninstalled first (set by Uninstall-WinUtilFeatureWSL, cleared by
+        Install-WinUtilFeatureWSL) before even querying DISM - "wsl --uninstall" deliberately
+        does not disable these optional features (that's a separate, more disruptive step this
+        app doesn't take), so the DISM state alone would still say "Enabled" immediately after
+        uninstalling WSL2 through WinUtil, incorrectly treating it as already usable and skipping
+        the restart-required gate in Resolve-WinUtilPrerequisites for anything selected in the
+        same app session afterward. This only covers uninstalls done through WinUtil in the
+        current session, not e.g. a manual "wsl --uninstall" from outside the app or a previous
+        session - DISM remains the source of truth for every other case.
     #>
+    if ($null -ne $sync -and $sync.ContainsKey("WSLRuntimeUninstalled") -and $sync.WSLRuntimeUninstalled) {
+        return $false
+    }
+
     Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $false -ScriptBlock {
         try {
             $features = Get-WindowsOptionalFeature -Online -ErrorAction Stop
@@ -6355,6 +6373,10 @@ Function Uninstall-WinUtilFeatureWSL {
             $output = (& wsl --uninstall 2>&1 | Out-String).Trim()
             Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --uninstall completed with no console output)" })
             Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
+            # The optional features stay "Enabled" per DISM even though the runtime is now gone
+            # (see above) - flag this so Test-WinUtilWSLFeatureEnabled doesn't keep reporting
+            # WSL2 as usable for the rest of this app session.
+            if ($null -ne $sync) { $sync.WSLRuntimeUninstalled = $true }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall WSL2: $_"
         }
@@ -7664,7 +7686,12 @@ function Invoke-WPFInstall {
                 @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
                 @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } }
             )) {
-                if (@($installBucket.Packages).Count -eq 0) { continue }
+                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
+                # missing bucket is correctly treated as empty here, instead of falling through
+                # to the installer call below with $null and crashing on its Mandatory
+                # [object[]] parameter ("Cannot bind argument ... because it is null").
+                $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
+                if ($bucketPackages.Count -eq 0) { continue }
 
                 $position = $completedPackages + 1
                 $startPercent = [int](($completedPackages / $totalPackages) * 100)
@@ -7672,9 +7699,9 @@ function Invoke-WPFInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                & $installBucket.Installer $installBucket.Packages
+                & $installBucket.Installer $bucketPackages
 
-                $completedPackages += @($installBucket.Packages).Count
+                $completedPackages += $bucketPackages.Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
@@ -7734,7 +7761,9 @@ function Invoke-WPFInstall {
                 @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } },
                 @{ Packages = $packagesStreamLinkManager; Label = "Streaming Library Manager"; Installer = { param($pkgs) Install-WinUtilStreamLinkManager -Packages $pkgs } }
             )) {
-                if (@($installBucket.Packages).Count -eq 0) { continue }
+                # @($null).Count is 1, not 0 - see the WSL bucket loop above for why this matters.
+                $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
+                if ($bucketPackages.Count -eq 0) { continue }
 
                 $position = $completedPackages + 1
                 $startPercent = [int](($completedPackages / $totalPackages) * 100)
@@ -7742,9 +7771,9 @@ function Invoke-WPFInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                & $installBucket.Installer $installBucket.Packages
+                & $installBucket.Installer $bucketPackages
 
-                $completedPackages += @($installBucket.Packages).Count
+                $completedPackages += $bucketPackages.Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
@@ -9098,7 +9127,12 @@ function Invoke-WPFUnInstall {
                 @{ Packages = $packagesWslDistro; Label = "WSL distro"; Uninstaller = { param($pkgs) Uninstall-WinUtilWSLDistro -Packages $pkgs } },
                 @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Uninstaller = { param($pkgs) Uninstall-WinUtilFeatureWSL -Packages $pkgs } }
             )) {
-                if (@($uninstallBucket.Packages).Count -eq 0) { continue }
+                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
+                # missing bucket is correctly treated as empty here, instead of falling through
+                # to the uninstaller call below with $null and crashing on its Mandatory
+                # [object[]] parameter ("Cannot bind argument ... because it is null").
+                $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
+                if ($bucketPackages.Count -eq 0) { continue }
 
                 $position = $completedPackages + 1
                 $startPercent = [int](($completedPackages / $totalPackages) * 100)
@@ -9106,9 +9140,9 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $($uninstallBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                & $uninstallBucket.Uninstaller $uninstallBucket.Packages
+                & $uninstallBucket.Uninstaller $bucketPackages
 
-                $completedPackages += @($uninstallBucket.Packages).Count
+                $completedPackages += $bucketPackages.Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $($uninstallBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent

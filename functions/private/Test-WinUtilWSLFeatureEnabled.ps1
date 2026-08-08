@@ -25,7 +25,21 @@ function Test-WinUtilWSLFeatureEnabled {
         calls this synchronously on the UI thread (it has to, to show its modal dialog), so a
         slow or hung DISM call there froze the whole app rather than just delaying a
         background operation.
+
+        Checks $sync.WSLRuntimeUninstalled first (set by Uninstall-WinUtilFeatureWSL, cleared by
+        Install-WinUtilFeatureWSL) before even querying DISM - "wsl --uninstall" deliberately
+        does not disable these optional features (that's a separate, more disruptive step this
+        app doesn't take), so the DISM state alone would still say "Enabled" immediately after
+        uninstalling WSL2 through WinUtil, incorrectly treating it as already usable and skipping
+        the restart-required gate in Resolve-WinUtilPrerequisites for anything selected in the
+        same app session afterward. This only covers uninstalls done through WinUtil in the
+        current session, not e.g. a manual "wsl --uninstall" from outside the app or a previous
+        session - DISM remains the source of truth for every other case.
     #>
+    if ($null -ne $sync -and $sync.ContainsKey("WSLRuntimeUninstalled") -and $sync.WSLRuntimeUninstalled) {
+        return $false
+    }
+
     Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $false -ScriptBlock {
         try {
             $features = Get-WindowsOptionalFeature -Online -ErrorAction Stop

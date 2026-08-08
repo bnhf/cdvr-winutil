@@ -306,6 +306,27 @@ Describe "Invoke-WPFInstall runspace body" {
         Remove-Variable -Name callOrder -Scope Script -ErrorAction SilentlyContinue
     }
 
+    It "does not crash when a package-manager bucket is null instead of an empty collection" {
+        # Regression guard for a real production crash: "Cannot bind argument to parameter
+        # 'Packages' because it is null." @($null).Count is 1, not 0, so a bucket that's $null
+        # (rather than a real empty collection) used to slip past the "is this bucket empty"
+        # check and get passed straight through to an installer function's Mandatory
+        # [object[]] parameter.
+        Mock Get-WinUtilSelectedPackages {
+            $split = New-WinUtilPackageSplit -Winget @("Docker.DockerDesktop") -Choco @()
+            $split["WslFeature"] = $null
+            $split["WslDistro"].Add("debian")
+            $split
+        }
+        Mock Install-WinUtilFeatureWSL { }
+        Mock Install-WinUtilWSLDistro { }
+
+        { Invoke-WPFInstall; & $script:capturedInstallScriptBlock -PackagesToInstall @($script:package) -ManagerPreference "Winget" } | Should -Not -Throw
+
+        Should -Invoke -CommandName Install-WinUtilFeatureWSL -Times 0 -Exactly
+        Should -Invoke -CommandName Install-WinUtilWSLDistro -Times 1 -Exactly -ParameterFilter { @($Packages) -join "|" -eq "debian" }
+    }
+
     It "shows failure progress, sets taskbar error state, and clears ProcessRunning on failure" {
         Mock Install-WinUtilProgramWinget { throw "winget failed" }
 

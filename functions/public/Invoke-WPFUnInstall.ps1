@@ -219,7 +219,12 @@ function Invoke-WPFUnInstall {
                 @{ Packages = $packagesWslDistro; Label = "WSL distro"; Uninstaller = { param($pkgs) Uninstall-WinUtilWSLDistro -Packages $pkgs } },
                 @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Uninstaller = { param($pkgs) Uninstall-WinUtilFeatureWSL -Packages $pkgs } }
             )) {
-                if (@($uninstallBucket.Packages).Count -eq 0) { continue }
+                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
+                # missing bucket is correctly treated as empty here, instead of falling through
+                # to the uninstaller call below with $null and crashing on its Mandatory
+                # [object[]] parameter ("Cannot bind argument ... because it is null").
+                $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
+                if ($bucketPackages.Count -eq 0) { continue }
 
                 $position = $completedPackages + 1
                 $startPercent = [int](($completedPackages / $totalPackages) * 100)
@@ -227,9 +232,9 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $($uninstallBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                & $uninstallBucket.Uninstaller $uninstallBucket.Packages
+                & $uninstallBucket.Uninstaller $bucketPackages
 
-                $completedPackages += @($uninstallBucket.Packages).Count
+                $completedPackages += $bucketPackages.Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $($uninstallBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent

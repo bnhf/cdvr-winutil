@@ -95,7 +95,12 @@ function Invoke-WPFInstall {
                 @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
                 @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } }
             )) {
-                if (@($installBucket.Packages).Count -eq 0) { continue }
+                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
+                # missing bucket is correctly treated as empty here, instead of falling through
+                # to the installer call below with $null and crashing on its Mandatory
+                # [object[]] parameter ("Cannot bind argument ... because it is null").
+                $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
+                if ($bucketPackages.Count -eq 0) { continue }
 
                 $position = $completedPackages + 1
                 $startPercent = [int](($completedPackages / $totalPackages) * 100)
@@ -103,9 +108,9 @@ function Invoke-WPFInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                & $installBucket.Installer $installBucket.Packages
+                & $installBucket.Installer $bucketPackages
 
-                $completedPackages += @($installBucket.Packages).Count
+                $completedPackages += $bucketPackages.Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
@@ -165,7 +170,9 @@ function Invoke-WPFInstall {
                 @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } },
                 @{ Packages = $packagesStreamLinkManager; Label = "Streaming Library Manager"; Installer = { param($pkgs) Install-WinUtilStreamLinkManager -Packages $pkgs } }
             )) {
-                if (@($installBucket.Packages).Count -eq 0) { continue }
+                # @($null).Count is 1, not 0 - see the WSL bucket loop above for why this matters.
+                $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
+                if ($bucketPackages.Count -eq 0) { continue }
 
                 $position = $completedPackages + 1
                 $startPercent = [int](($completedPackages / $totalPackages) * 100)
@@ -173,9 +180,9 @@ function Invoke-WPFInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                & $installBucket.Installer $installBucket.Packages
+                & $installBucket.Installer $bucketPackages
 
-                $completedPackages += @($installBucket.Packages).Count
+                $completedPackages += $bucketPackages.Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
