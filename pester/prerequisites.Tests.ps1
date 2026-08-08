@@ -3,6 +3,15 @@
 #===========================================================================
 
 BeforeAll {
+    # In the real app, [System.Windows.MessageBoxButton]/[System.Windows.MessageBoxResult]
+    # (used throughout Resolve-WinUtilPrerequisites and these tests) resolve for free because
+    # scripts/main.ps1 references [Windows.Markup.XamlReader] to load the UI long before any
+    # dialog is shown, which pulls in PresentationFramework as a side effect. Nothing here loads
+    # XAML, so without this, whether that type resolves depends on whether some unrelated test
+    # file happened to run first in the same pwsh session and loaded it incidentally - loading it
+    # explicitly makes this file's results deterministic regardless of run order.
+    Add-Type -AssemblyName PresentationFramework
+
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
     . (Join-Path $script:repoRoot "functions\private\Invoke-WinUtilWithTimeout.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilWSLFeatureEnabled.ps1")
@@ -136,6 +145,10 @@ Describe "Resolve-WinUtilPrerequisites virtualization gate" {
         })
         Mock Test-WinUtilProgramInstalled { $false }
         Mock Write-WinUtilLog { }
+        # Deterministic default so these tests don't depend on this machine's real WSL2 state
+        # (Test-WinUtilWSLFeatureEnabled is otherwise unmocked here, which would hit real DISM).
+        # "Not already enabled" is also the realistic default for these scenarios.
+        Mock Test-WinUtilWSLFeatureEnabled { $false }
     }
 
     AfterEach {
@@ -185,26 +198,104 @@ Describe "Resolve-WinUtilPrerequisites virtualization gate" {
         Should -Invoke -CommandName Show-WinUtilMessage -Times 0 -Exactly
     }
 
-    It "proceeds to the normal missing-prerequisite prompt when virtualization status is unknown" {
+    It "pulls WSL2 into the queue via the normal Yes/No prompt when virtualization status is unknown, then defers Docker Desktop to the WSL2 restart gate" {
+        # The missing-prereq Yes/No prompt and the WSL2-restart-gate's OK-only dialog both go
+        # through Show-WinUtilMessage - differentiate by -Button, matching the "WSL2 restart
+        # gate" Describe block below. WSL2 isn't already enabled in this scenario (that's why
+        # the Yes/No prompt fires at all), so the restart gate correctly engages too - Docker
+        # Desktop can't proceed in the same run as first-enabling WSL2.
         Mock Test-WinUtilVirtualizationFirmwareEnabled { $null }
-        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes } -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::YesNo) }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::OK } -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::OK) }
 
         $docker = [pscustomobject]@{ Key = "dockerdesktop"; content = "Docker Desktop"; winget = "Docker.DockerDesktop"; requires = @("wsl2") }
         $resolved = Resolve-WinUtilPrerequisites -PackagesToInstall @($docker)
 
-        # wsl2 gets pulled in via the normal Yes/No prerequisite flow, not dropped
         @($resolved.Key) | Should -Contain "wsl2"
-        @($resolved.Key) | Should -Contain "dockerdesktop"
+        @($resolved.Key) | Should -Not -Contain "dockerdesktop"
     }
 
-    It "proceeds normally when virtualization is confirmed enabled" {
+    It "pulls WSL2 into the queue when virtualization is confirmed enabled, then defers Docker Desktop to the WSL2 restart gate" {
         Mock Test-WinUtilVirtualizationFirmwareEnabled { $true }
-        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes } -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::YesNo) }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::OK } -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::OK) }
 
         $docker = [pscustomobject]@{ Key = "dockerdesktop"; content = "Docker Desktop"; winget = "Docker.DockerDesktop"; requires = @("wsl2") }
         $resolved = Resolve-WinUtilPrerequisites -PackagesToInstall @($docker)
 
         @($resolved.Key) | Should -Contain "wsl2"
+        @($resolved.Key) | Should -Not -Contain "dockerdesktop"
+    }
+}
+
+Describe "Resolve-WinUtilPrerequisites WSL2 restart gate" {
+    BeforeEach {
+        $script:sync = [Hashtable]::Synchronized(@{
+            configs = [pscustomobject]@{
+                applicationsHashtable = @{
+                    WPFInstallwsl2 = [pscustomobject]@{ content = "WSL2"; installType = "wslFeature" }
+                    WPFInstalldebian = [pscustomobject]@{ content = "Debian"; installType = "wslDistro"; distro = "Debian"; requires = @("wsl2") }
+                    WPFInstalldockerdesktop = [pscustomobject]@{ content = "Docker Desktop"; winget = "Docker.DockerDesktop"; requires = @("wsl2", "debian") }
+                }
+            }
+        })
+        Mock Test-WinUtilProgramInstalled { $false }
+        Mock Test-WinUtilWSLDistroInstalled { $false }
+        Mock Test-WinUtilVirtualizationFirmwareEnabled { $true }
+        Mock Write-WinUtilLog { }
+    }
+
+    AfterEach {
+        Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "installs WSL2 only and defers everything that needs it, when WSL2 isn't already enabled" {
+        # Regression guard for a real report: WSL2 enabled successfully, but the immediately-
+        # following Debian install failed - because enabling WSL2 for the first time typically
+        # needs a restart before it's actually usable, so attempting a WSL2-dependent install in
+        # the very same run is unreliable regardless of how correctly each step is implemented.
+        Mock Test-WinUtilWSLFeatureEnabled { $false }
+        # The missing-prereq Yes/No prompt and the new restart-required OK-only dialog both go
+        # through Show-WinUtilMessage - differentiate by -Button so "Yes" only answers the
+        # former (an OK-only dialog has no "Yes" result to return).
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes } -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::YesNo) }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::OK } -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::OK) }
+
+        $docker = [pscustomobject]@{ Key = "dockerdesktop"; content = "Docker Desktop"; winget = "Docker.DockerDesktop"; requires = @("wsl2", "debian") }
+        $resolved = Resolve-WinUtilPrerequisites -PackagesToInstall @($docker)
+
+        @($resolved.Key) | Should -Contain "wsl2"
+        @($resolved.Key) | Should -Not -Contain "debian"
+        @($resolved.Key) | Should -Not -Contain "dockerdesktop"
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 1 -Exactly -ParameterFilter {
+            $Title -eq "Restart required for WSL2" -and $Button -eq ([System.Windows.MessageBoxButton]::OK)
+        }
+    }
+
+    It "proceeds normally in one run when WSL2 is already enabled" {
+        # WSL2 already being enabled means there's nothing to queue for it specifically (it's
+        # already installed, same as any other already-satisfied prerequisite) - what matters
+        # here is that its dependents are NOT deferred, unlike the "not already enabled" case
+        # above.
+        Mock Test-WinUtilWSLFeatureEnabled { $true }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::Yes }
+
+        $docker = [pscustomobject]@{ Key = "dockerdesktop"; content = "Docker Desktop"; winget = "Docker.DockerDesktop"; requires = @("wsl2", "debian") }
+        $resolved = Resolve-WinUtilPrerequisites -PackagesToInstall @($docker)
+
+        @($resolved.Key) | Should -Contain "debian"
         @($resolved.Key) | Should -Contain "dockerdesktop"
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 0 -Exactly -ParameterFilter { $Title -eq "Restart required for WSL2" }
+    }
+
+    It "does not gate when nothing in the run actually needs a working WSL2" {
+        Mock Test-WinUtilWSLFeatureEnabled { $false }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::OK }
+
+        $wsl2 = [pscustomobject]@{ Key = "wsl2"; content = "WSL2"; installType = "wslFeature" }
+        $resolved = Resolve-WinUtilPrerequisites -PackagesToInstall @($wsl2)
+
+        @($resolved.Key) | Should -Contain "wsl2"
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 0 -Exactly
     }
 }

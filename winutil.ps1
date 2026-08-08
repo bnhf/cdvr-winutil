@@ -4904,6 +4904,28 @@ function Resolve-WinUtilPrerequisites {
 
     foreach ($d in $toDrop) { [void]$result.Remove($d) }
 
+    # WSL2, unlike the other prerequisites here, typically needs a system restart the first time
+    # it's enabled before it's actually usable - installing a distro (or anything that needs a
+    # working WSL2, e.g. Docker Desktop) in the very same run as enabling WSL2 for the first time
+    # is likely to fail even though the WSL2 feature install itself succeeded (this is what
+    # happened: WSL2 enabled fine, the immediately-following Debian install then failed). Only
+    # gates when WSL2 wasn't already enabled before this run - if it's already usable, there's
+    # nothing to restart for, and everything proceeds normally in one run as before.
+    if (-not (Test-WinUtilWSLFeatureEnabled)) {
+        $wslDependents = @($result) | Where-Object {
+            $_.installType -ne "wslFeature" -and ($_.installType -eq "wslDistro" -or ($_.requires -and $_.requires -contains "wsl2"))
+        }
+        if ($wslDependents.Count -gt 0) {
+            $names = ($wslDependents | ForEach-Object { $_.content }) -join ", "
+            [void](Show-WinUtilMessage -Message "WSL2 needs a system restart before it can actually be used - installing it and then immediately installing $names in the same run is likely to fail. This run will enable WSL2 only.`n`nRestart your PC, then come back and install: $names" -Title "Restart required for WSL2" -Button ([System.Windows.MessageBoxButton]::OK) -Icon "Warning")
+            Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping WSL2-dependent packages this run - WSL2 was not already enabled and typically needs a restart first: $names"
+            foreach ($p in $wslDependents) {
+                [void]$result.Remove($p)
+                if ($p.Key) { [void]$queuedKeys.Remove([string]$p.Key) }
+            }
+        }
+    }
+
     # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
     # function-return boundary, and $null then fails to bind to Resolve-WinUtilPackagePrompts's
     # mandatory [object[]] parameter (e.g. every selected package had a declined/blocked
