@@ -459,6 +459,7 @@ Describe "XAML and sync wiring" {
             "ToggleStatusCache",
             "InstallAppRenderQueue",
             "InstallAppEntriesRendered",
+            "SuppressSelectedAppsMenuRebuild",
             "FontScaleFactor",
             "Win11ISOImageInfo",
             "Win11ISODriveLetter",

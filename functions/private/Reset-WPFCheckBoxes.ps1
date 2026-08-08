@@ -22,11 +22,23 @@ function Reset-WPFCheckBoxes {
     )
     $selectedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($sync.selectedApps + $sync.selectedTweaks + $sync.selectedFeatures + $sync.selectedAppx), [StringComparer]::OrdinalIgnoreCase)
 
-    foreach ($syncEntry in $sync.GetEnumerator()) {
-        if ($syncEntry.Value -is [System.Windows.Controls.CheckBox] -and $syncEntry.Name -notlike "WPFToggle*" -and $syncEntry.Name -like $checkboxfilterpattern) {
-            $checkboxName = $syncEntry.Key
-            $sync.$checkboxName.IsChecked = $selectedSet.Contains($checkboxName)
+    # Setting .IsChecked below fires each checkbox's Checked/Unchecked handler, which calls
+    # Invoke-WPFSelectedCheckboxesUpdate - that rebuilds the entire Selected Apps popup menu
+    # from scratch on every single call. Toggling many checkboxes here (e.g. after a "Show
+    # Installed Apps" scan finds a couple dozen already-installed apps) would otherwise trigger
+    # that full rebuild once per checkbox - O(n^2) menu rebuilds - even though this function
+    # already does the definitive rebuild itself, once, right below. Suppress the per-checkbox
+    # rebuild for the duration of this loop.
+    $sync.SuppressSelectedAppsMenuRebuild = $true
+    try {
+        foreach ($syncEntry in $sync.GetEnumerator()) {
+            if ($syncEntry.Value -is [System.Windows.Controls.CheckBox] -and $syncEntry.Name -notlike "WPFToggle*" -and $syncEntry.Name -like $checkboxfilterpattern) {
+                $checkboxName = $syncEntry.Key
+                $sync.$checkboxName.IsChecked = $selectedSet.Contains($checkboxName)
+            }
         }
+    } finally {
+        $sync.SuppressSelectedAppsMenuRebuild = $false
     }
 
     # Update Installs tab UI values

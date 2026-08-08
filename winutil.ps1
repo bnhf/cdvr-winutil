@@ -4514,11 +4514,23 @@ function Reset-WPFCheckBoxes {
     )
     $selectedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($sync.selectedApps + $sync.selectedTweaks + $sync.selectedFeatures + $sync.selectedAppx), [StringComparer]::OrdinalIgnoreCase)
 
-    foreach ($syncEntry in $sync.GetEnumerator()) {
-        if ($syncEntry.Value -is [System.Windows.Controls.CheckBox] -and $syncEntry.Name -notlike "WPFToggle*" -and $syncEntry.Name -like $checkboxfilterpattern) {
-            $checkboxName = $syncEntry.Key
-            $sync.$checkboxName.IsChecked = $selectedSet.Contains($checkboxName)
+    # Setting .IsChecked below fires each checkbox's Checked/Unchecked handler, which calls
+    # Invoke-WPFSelectedCheckboxesUpdate - that rebuilds the entire Selected Apps popup menu
+    # from scratch on every single call. Toggling many checkboxes here (e.g. after a "Show
+    # Installed Apps" scan finds a couple dozen already-installed apps) would otherwise trigger
+    # that full rebuild once per checkbox - O(n^2) menu rebuilds - even though this function
+    # already does the definitive rebuild itself, once, right below. Suppress the per-checkbox
+    # rebuild for the duration of this loop.
+    $sync.SuppressSelectedAppsMenuRebuild = $true
+    try {
+        foreach ($syncEntry in $sync.GetEnumerator()) {
+            if ($syncEntry.Value -is [System.Windows.Controls.CheckBox] -and $syncEntry.Name -notlike "WPFToggle*" -and $syncEntry.Name -like $checkboxfilterpattern) {
+                $checkboxName = $syncEntry.Key
+                $sync.$checkboxName.IsChecked = $selectedSet.Contains($checkboxName)
+            }
         }
+    } finally {
+        $sync.SuppressSelectedAppsMenuRebuild = $false
     }
 
     # Update Installs tab UI values
@@ -7689,7 +7701,10 @@ function Invoke-WPFSelectedCheckboxesUpdate ($type, $checkboxName) {
         $selectionChanged = $sync.$listName.Remove($checkboxName)
     }
 
-    if ($listName -eq "selectedApps" -and $selectionChanged) {
+    # Reset-WPFCheckBoxes sets this while bulk-toggling many checkboxes at once (e.g. after a
+    # "Show Installed Apps" scan) - it does its own single rebuild afterward, so rebuilding here
+    # on every individual checkbox change during that loop would be pure O(n^2) wasted work.
+    if ($listName -eq "selectedApps" -and $selectionChanged -and -not $sync.SuppressSelectedAppsMenuRebuild) {
         $sync.WPFselectedAppsButton.Content = "Selected Apps: $($sync.selectedApps.Count)"
         $sync.selectedAppsstackPanel.Children.Clear()
         $sync.selectedApps | Sort-Object | ForEach-Object {

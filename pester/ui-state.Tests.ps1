@@ -225,6 +225,25 @@ Describe "Invoke-WPFSelectedCheckboxesUpdate" {
         $script:sync.WPFselectedAppsButton.Content | Should -Be "Selected Apps: 0"
         $script:sync.selectedAppsstackPanel.Children.Count | Should -Be 0
     }
+
+    It "skips the selected-apps menu rebuild while suppressed, so bulk updates don't rebuild it once per app" {
+        # Real WPF CheckBox.IsChecked fires Checked/Unchecked, which calls this function - the
+        # lightweight test CheckBox stub doesn't simulate that, so this drives the same call
+        # pattern Reset-WPFCheckBoxes's bulk-update loop would produce directly, to prove the
+        # suppression guard actually skips the (expensive, full) rebuild while it's set.
+        $script:sync.SuppressSelectedAppsMenuRebuild = $true
+        1..5 | ForEach-Object {
+            Invoke-WPFSelectedCheckboxesUpdate -type "Add" -checkboxName "WPFInstallApp$_"
+        }
+        $script:sync.SuppressSelectedAppsMenuRebuild = $false
+
+        @($script:sync.selectedApps).Count | Should -Be 5
+        $script:sync.selectedAppsstackPanel.Children.Count | Should -Be 0
+
+        # A normal (non-suppressed) update afterward still rebuilds it correctly, in one pass
+        Invoke-WPFSelectedCheckboxesUpdate -type "Add" -checkboxName "WPFInstallApp6"
+        $script:sync.selectedAppsstackPanel.Children.Count | Should -Be 6
+    }
 }
 
 Describe "Invoke-WPFGetInstalled selection state" {
@@ -350,6 +369,9 @@ Describe "Reset-WPFCheckBoxes" {
         $script:sync.selectedAppsstackPanel.Children.Count | Should -Be 1
         $script:sync.selectedAppsstackPanel.Children[0].Name | Should -Be "Git"
         $script:sync.selectedAppsstackPanel.Children[0].Key | Should -Be "WPFInstallGit"
+        # Must end unsuppressed - otherwise every checkbox click after a Reset-WPFCheckBoxes
+        # run would silently stop updating the Selected Apps popup menu.
+        $script:sync.SuppressSelectedAppsMenuRebuild | Should -BeFalse
     }
 
     It "restores imported toggles when requested without changing absent toggles" {

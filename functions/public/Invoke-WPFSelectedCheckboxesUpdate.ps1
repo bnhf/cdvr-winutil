@@ -17,7 +17,10 @@ function Invoke-WPFSelectedCheckboxesUpdate ($type, $checkboxName) {
         $selectionChanged = $sync.$listName.Remove($checkboxName)
     }
 
-    if ($listName -eq "selectedApps" -and $selectionChanged) {
+    # Reset-WPFCheckBoxes sets this while bulk-toggling many checkboxes at once (e.g. after a
+    # "Show Installed Apps" scan) - it does its own single rebuild afterward, so rebuilding here
+    # on every individual checkbox change during that loop would be pure O(n^2) wasted work.
+    if ($listName -eq "selectedApps" -and $selectionChanged -and -not $sync.SuppressSelectedAppsMenuRebuild) {
         $sync.WPFselectedAppsButton.Content = "Selected Apps: $($sync.selectedApps.Count)"
         $sync.selectedAppsstackPanel.Children.Clear()
         $sync.selectedApps | Sort-Object | ForEach-Object {
