@@ -390,7 +390,6 @@ $sync["SearchBar"].Add_TextChanged({
 # Quick Category Search Chips
 $sync["WPFSearchChipAll"].Add_Click({ Set-WinUtilAppCategoryFilter })
 $sync["WPFSearchChipFoundational"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Foundational" })
-$sync["WPFSearchChipBrowsers"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Browsers" })
 $sync["WPFSearchChipChannelsDVR"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR" })
 $sync["WPFSearchChipChannelsDVRClients"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR Windows Clients" })
 $sync["WPFSearchChipChannelsDVRSources"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR Sources (non-Docker)" })

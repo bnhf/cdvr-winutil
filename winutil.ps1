@@ -1151,7 +1151,7 @@ function Initialize-InstallCategoryAppList {
         $sync.InstallAppRenderQueue = [System.Collections.Queue]::new()
 
         # Categories render in this order; anything not listed falls back to the end, alphabetically.
-        $categoryOrder = @("Foundational", "Browsers", "Channels DVR", "Channels DVR Windows Clients", "Channels DVR Sources (non-Docker)")
+        $categoryOrder = @("Foundational", "Channels DVR", "Channels DVR Windows Clients", "Channels DVR Sources (non-Docker)")
         $sortedCategories = $appsByCategory.Keys | Sort-Object -Property @(
             @{ Expression = { $index = $categoryOrder.IndexOf($_); if ($index -lt 0) { [int]::MaxValue } else { $index } } },
             @{ Expression = { $_ } }
@@ -8905,18 +8905,8 @@ $sync.configs.applications = @'
     ],
     "foss": true
   },
-  "WPFInstallbrave": {
-    "category": "Browsers",
-    "choco": "brave",
-    "content": "Brave",
-    "description": "Brave is a privacy-focused web browser that blocks ads and trackers, offering a faster and safer browsing experience.",
-    "link": "https://www.brave.com",
-    "handle": "Brave Software",
-    "winget": "Brave.Brave",
-    "foss": true
-  },
   "WPFInstallchrome": {
-    "category": "Browsers",
+    "category": "Foundational",
     "choco": "googlechrome",
     "content": "Chrome",
     "description": "Google Chrome is a widely used web browser known for its speed, simplicity, and seamless integration with Google services.",
@@ -8926,7 +8916,7 @@ $sync.configs.applications = @'
     "foss": false
   },
   "WPFInstallfirefox": {
-    "category": "Browsers",
+    "category": "Foundational",
     "choco": "firefox",
     "content": "Firefox",
     "description": "Mozilla Firefox is an open-source web browser known for its customization options, privacy features, and extensions.",
@@ -8935,25 +8925,16 @@ $sync.configs.applications = @'
     "winget": "Mozilla.Firefox",
     "foss": true
   },
-  "WPFInstalledge": {
-    "category": "Browsers",
-    "choco": "microsoft-edge",
-    "content": "Edge",
-    "description": "Microsoft Edge is a modern web browser built on Chromium, offering performance, security, and integration with Microsoft services.",
-    "link": "https://www.microsoft.com/edge",
-    "handle": "Microsoft",
-    "winget": "Microsoft.Edge",
-    "foss": false
-  },
-  "WPFInstallvivaldi": {
-    "category": "Browsers",
-    "choco": "vivaldi",
-    "content": "Vivaldi",
-    "description": "Vivaldi is a highly customizable web browser with a focus on user personalization and productivity features.",
-    "link": "https://vivaldi.com/",
-    "handle": "Vivaldi Technologies",
-    "winget": "Vivaldi.Vivaldi",
-    "foss": false
+  "WPFInstallvlc": {
+    "category": "Foundational",
+    "choco": "vlc",
+    "content": "VLC",
+    "description": "VLC media player is a free, open-source, cross-platform multimedia player that plays most local video/audio files and discs, by VideoLAN.",
+    "link": "https://www.videolan.org/vlc/",
+    "icon": "https://upload.wikimedia.org/wikipedia/commons/3/38/VLC_icon.png",
+    "handle": "VideoLAN",
+    "winget": "VideoLAN.VLC",
+    "foss": true
   },
   "WPFInstallchannelsdvr": {
     "category": "Channels DVR",
@@ -13045,7 +13026,6 @@ $inputXML = @'
                                    Margin="15,0,8,0"/>
                         <Button Name="WPFSearchChipAll"                    Content="All"                                  Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipFoundational"           Content="Foundational"                         Style="{StaticResource FilterChipStyle}"/>
-                        <Button Name="WPFSearchChipBrowsers"               Content="Browsers"                             Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipChannelsDVR"            Content="Channels DVR"                         Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipChannelsDVRClients"     Content="Channels DVR Windows Clients"         Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipChannelsDVRSources"     Content="Channels DVR Sources (non-Docker)"    Style="{StaticResource FilterChipStyle}"/>
@@ -13995,7 +13975,6 @@ $sync["SearchBar"].Add_TextChanged({
 # Quick Category Search Chips
 $sync["WPFSearchChipAll"].Add_Click({ Set-WinUtilAppCategoryFilter })
 $sync["WPFSearchChipFoundational"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Foundational" })
-$sync["WPFSearchChipBrowsers"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Browsers" })
 $sync["WPFSearchChipChannelsDVR"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR" })
 $sync["WPFSearchChipChannelsDVRClients"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR Windows Clients" })
 $sync["WPFSearchChipChannelsDVRSources"].Add_Click({ Set-WinUtilAppCategoryFilter -Category "Channels DVR Sources (non-Docker)" })

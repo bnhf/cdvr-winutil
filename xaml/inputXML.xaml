@@ -1310,7 +1310,6 @@
                                    Margin="15,0,8,0"/>
                         <Button Name="WPFSearchChipAll"                    Content="All"                                  Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipFoundational"           Content="Foundational"                         Style="{StaticResource FilterChipStyle}"/>
-                        <Button Name="WPFSearchChipBrowsers"               Content="Browsers"                             Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipChannelsDVR"            Content="Channels DVR"                         Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipChannelsDVRClients"     Content="Channels DVR Windows Clients"         Style="{StaticResource FilterChipStyle}"/>
                         <Button Name="WPFSearchChipChannelsDVRSources"     Content="Channels DVR Sources (non-Docker)"    Style="{StaticResource FilterChipStyle}"/>
