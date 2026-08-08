@@ -18,20 +18,20 @@ BeforeAll {
 Describe "Test-WinUtilWSLFeatureEnabled" {
     It "returns true only when both required optional features are enabled" {
         Mock Get-WindowsOptionalFeature {
-            param($Online, $FeatureName)
-            [pscustomobject]@{ State = "Enabled" }
+            @(
+                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
+                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
+            )
         }
         Test-WinUtilWSLFeatureEnabled | Should -Be $true
     }
 
     It "returns false when VirtualMachinePlatform is missing even if the base WSL feature is enabled" {
         Mock Get-WindowsOptionalFeature {
-            param($Online, $FeatureName)
-            if ($FeatureName -eq "VirtualMachinePlatform") {
-                [pscustomobject]@{ State = "Disabled" }
-            } else {
-                [pscustomobject]@{ State = "Enabled" }
-            }
+            @(
+                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
+                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Disabled" }
+            )
         }
         Test-WinUtilWSLFeatureEnabled | Should -Be $false
     }
@@ -39,6 +39,21 @@ Describe "Test-WinUtilWSLFeatureEnabled" {
     It "returns false when the query fails" {
         Mock Get-WindowsOptionalFeature { throw "not supported on this SKU" }
         Test-WinUtilWSLFeatureEnabled | Should -Be $false
+    }
+
+    It "queries Get-WindowsOptionalFeature exactly once, not once per feature" {
+        # Regression guard: Get-WindowsOptionalFeature is DISM-backed and slow regardless of
+        # how narrow -FeatureName is, and Resolve-WinUtilPrerequisites calls this synchronously
+        # on the UI thread - calling it once per feature made the app appear to hang while
+        # installing anything that requires WSL2 (e.g. Docker Desktop).
+        Mock Get-WindowsOptionalFeature {
+            @(
+                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
+                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
+            )
+        }
+        Test-WinUtilWSLFeatureEnabled | Out-Null
+        Should -Invoke -CommandName Get-WindowsOptionalFeature -Times 1 -Exactly
     }
 }
 
