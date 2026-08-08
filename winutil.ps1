@@ -736,6 +736,94 @@ function Get-WinUtilPackageLogSummary {
     })
 }
 
+function Get-WinUtilPackagesInDependencyOrder {
+    <#
+    .SYNOPSIS
+        Reorders packages so anything another selected package "requires" installs first.
+
+    .DESCRIPTION
+        Invoke-WPFInstall.ps1 already runs the WSL2-feature/distro buckets before winget/choco
+        as a whole, but packages sharing the SAME bucket (e.g. Docker Desktop and Debian both
+        installing via winget now that Debian moved off "wsl --install") had no ordering between
+        them - confirmed live: Docker Desktop installed before Debian despite declaring "debian"
+        as a requirement, which happened to be harmless this time (Docker Desktop's own install
+        doesn't actually need Debian present, only Olivetin - which runs inside Debian - does),
+        but is exactly the kind of ordering an actual dependency could break on.
+
+        A topological sort by .Key/.requires, not a hardcoded pairwise check - the catalog
+        already has multi-level chains (wsl2 -> debian -> dockerdesktop -> olivetin), and a
+        general sort handles any current or future one correctly without needing to special-case
+        each pair. Packages without a .Key can't participate in the requires graph (nothing can
+        reference them, and their own "requires" can't be resolved against .Key), so they always
+        qualify immediately.
+
+        Implemented as repeated passes over the remaining packages (emit anything whose
+        in-selection requirements are already placed, repeat until nothing changes), rather than
+        recursive-descent through a nested helper function - functionally equivalent, but reads
+        more directly as "keep placing whatever's ready" without needing a second function to
+        follow. Bounded to at most Packages.Count passes - a dependency cycle (should never
+        happen from the catalog itself, but a defensive guard for it regardless) stops making
+        progress and whatever's left just gets appended in its original order rather than
+        looping forever.
+
+        Returns ,$sorted.ToArray() (leading comma) rather than $sorted.ToArray() - the usual
+        reason (PowerShell unwraps a returned empty array to $null across a function-return
+        boundary otherwise) plus a corollary worth knowing at every call site: a caller that
+        wraps the CALL ITSELF in @(...) - e.g. @(Get-WinUtilPackagesInDependencyOrder ...).Count
+        - double-wraps the result, since the comma already makes the array a single pipeline
+        object and @() around the call adds another layer. Capture the result in a variable
+        first ($result = Get-WinUtilPackagesInDependencyOrder ...), then wrap or measure that
+        variable - @() around an already-materialized array variable is idempotent, only @()
+        around the call itself is not.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Packages
+    )
+
+    $byKey = @{}
+    foreach ($p in $Packages) {
+        if ($p.Key) { $byKey[[string]$p.Key] = $p }
+    }
+
+    $remaining = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $Packages) { $remaining.Add($p) }
+
+    $sorted = [System.Collections.Generic.List[object]]::new()
+    $placedKeys = [System.Collections.Generic.HashSet[string]]::new()
+
+    $maxPasses = $remaining.Count
+    for ($pass = 0; $pass -lt $maxPasses -and $remaining.Count -gt 0; $pass++) {
+        $placedThisPass = [System.Collections.Generic.List[object]]::new()
+
+        foreach ($package in @($remaining)) {
+            $unmetRequirement = $false
+            foreach ($reqKey in @($package.requires)) {
+                $reqKeyString = [string]$reqKey
+                if ($byKey.ContainsKey($reqKeyString) -and -not $placedKeys.Contains($reqKeyString)) {
+                    $unmetRequirement = $true
+                    break
+                }
+            }
+
+            if (-not $unmetRequirement) {
+                $sorted.Add($package)
+                if ($package.Key) { [void]$placedKeys.Add([string]$package.Key) }
+                $placedThisPass.Add($package)
+            }
+        }
+
+        if ($placedThisPass.Count -eq 0) { break }
+        foreach ($p in $placedThisPass) { [void]$remaining.Remove($p) }
+    }
+
+    # Only reached on a genuine dependency cycle - append what's left rather than drop it.
+    foreach ($p in $remaining) { $sorted.Add($p) }
+
+    return ,$sorted.ToArray()
+}
+
 function Get-WinUtilSelectedPackages {
 
      param(
@@ -5063,12 +5151,17 @@ function Resolve-WinUtilPrerequisites {
         }
     }
 
+    # Packages sharing the same install bucket (e.g. Docker Desktop and Debian both installing
+    # via winget) had no ordering relative to each other before this - see
+    # Get-WinUtilPackagesInDependencyOrder.ps1 for the confirmed real case that prompted it.
+    $orderedResult = Get-WinUtilPackagesInDependencyOrder -Packages @($result)
+
     # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
     # function-return boundary, and $null then fails to bind to Resolve-WinUtilPackagePrompts's
     # mandatory [object[]] parameter (e.g. every selected package had a declined/blocked
     # prerequisite) - a ParameterArgumentValidationErrorNullNotAllowed exception instead of the
     # intended "nothing left to install" no-op.
-    return ,$result.ToArray()
+    return ,$orderedResult
 }
 
 function Save-WinUtilFile {
@@ -7874,9 +7967,17 @@ function Invoke-WPFInstall {
         # winget/choco IDs actually installed/uninstalled don't carry the friendly display name -
         # this maps back to it (falling back to the raw ID) for the failure summary below.
         $packageNameById = @{}
+        # Same idea, for winget packages that declare a postInstallCommand (e.g. launching an
+        # app once so its first-run setup starts right away) - Install-WinUtilProgramWinget only
+        # deals in bare winget ID strings, not full package objects, so this is how the winget
+        # install loop below finds the command to run after a given ID installs successfully.
+        $postInstallCommandById = @{}
         foreach ($p in $PackagesToInstall) {
             if ($p.winget -and $p.winget -ne "na") { $packageNameById[$p.winget -replace '^msstore:', ''] = $p.content }
             if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
+            if ($p.winget -and $p.winget -ne "na" -and -not [string]::IsNullOrWhiteSpace($p.postInstallCommand)) {
+                $postInstallCommandById[$p.winget -replace '^msstore:', ''] = $p.postInstallCommand
+            }
         }
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
@@ -7936,6 +8037,15 @@ function Invoke-WPFInstall {
                     foreach ($r in $installResults) {
                         if (-not $r.Success) {
                             $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                        } elseif ($postInstallCommandById.ContainsKey($r.Program)) {
+                            $postInstallName = if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }
+                            Write-WinUtilLog -Component "Install" -Message "Running post-install step for $postInstallName`: $($postInstallCommandById[$r.Program])"
+                            try {
+                                & ([scriptblock]::Create($postInstallCommandById[$r.Program]))
+                                Write-WinUtilLog -Component "Install" -Message "$postInstallName post-install step completed"
+                            } catch {
+                                Write-WinUtilLog -Level "ERROR" -Component "Install" -Message "Post-install step failed for ${postInstallName}: $_"
+                            }
                         }
                     }
                     $completedPackages++
@@ -9769,13 +9879,14 @@ $sync.configs.applications = @'
   "WPFInstalldebian": {
     "category": "Foundational",
     "content": "Debian (WSL)",
-    "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup. After installing, launch it once from the Start Menu (not via \"wsl -d Debian\" in an existing terminal) to finish creating its Linux user account - that first-run step needs a real interactive console.",
+    "description": "Debian Linux distro running under WSL2 - hosts the Olivetin (EZ-Start) docker setup. Opens automatically after installing so you can finish creating its Linux user account right away - that first-run step needs a real interactive console, so answer its username/password prompts in the window that appears.",
     "link": "https://www.debian.org/",
     "handle": "Debian Project",
     "winget": "Debian.Debian",
     "requires": [
       "wsl2"
     ],
+    "postInstallCommand": "$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User'); Start-Process debian.exe",
     "foss": true
   },
   "WPFInstallchrome": {

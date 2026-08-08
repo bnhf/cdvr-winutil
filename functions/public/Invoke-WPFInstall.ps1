@@ -69,9 +69,17 @@ function Invoke-WPFInstall {
         # winget/choco IDs actually installed/uninstalled don't carry the friendly display name -
         # this maps back to it (falling back to the raw ID) for the failure summary below.
         $packageNameById = @{}
+        # Same idea, for winget packages that declare a postInstallCommand (e.g. launching an
+        # app once so its first-run setup starts right away) - Install-WinUtilProgramWinget only
+        # deals in bare winget ID strings, not full package objects, so this is how the winget
+        # install loop below finds the command to run after a given ID installs successfully.
+        $postInstallCommandById = @{}
         foreach ($p in $PackagesToInstall) {
             if ($p.winget -and $p.winget -ne "na") { $packageNameById[$p.winget -replace '^msstore:', ''] = $p.content }
             if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
+            if ($p.winget -and $p.winget -ne "na" -and -not [string]::IsNullOrWhiteSpace($p.postInstallCommand)) {
+                $postInstallCommandById[$p.winget -replace '^msstore:', ''] = $p.postInstallCommand
+            }
         }
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
@@ -131,6 +139,15 @@ function Invoke-WPFInstall {
                     foreach ($r in $installResults) {
                         if (-not $r.Success) {
                             $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                        } elseif ($postInstallCommandById.ContainsKey($r.Program)) {
+                            $postInstallName = if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }
+                            Write-WinUtilLog -Component "Install" -Message "Running post-install step for $postInstallName`: $($postInstallCommandById[$r.Program])"
+                            try {
+                                & ([scriptblock]::Create($postInstallCommandById[$r.Program]))
+                                Write-WinUtilLog -Component "Install" -Message "$postInstallName post-install step completed"
+                            } catch {
+                                Write-WinUtilLog -Level "ERROR" -Component "Install" -Message "Post-install step failed for ${postInstallName}: $_"
+                            }
                         }
                     }
                     $completedPackages++

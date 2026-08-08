@@ -6,6 +6,7 @@ BeforeAll {
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPackageLogSummary.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPackagesInDependencyOrder.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPrerequisites.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPackagePrompts.ps1")
     . (Join-Path $script:repoRoot "functions\public\Invoke-WPFInstall.ps1")
@@ -284,6 +285,45 @@ Describe "Invoke-WPFInstall runspace body" {
             $ScriptBlock.ToString() -like '*Set-WinUtilTaskbaritem -state "None" -overlay "checkmark"*'
         }
         $script:sync.ProcessRunning | Should -BeFalse
+    }
+
+    It "runs postInstallCommand after a package installs successfully via winget" {
+        # Regression guard: Debian moving to a winget install meant its first-run OOBE prompt
+        # (creating a Linux user/password) needed a real interactive console, which "wsl -d
+        # Debian" from an existing terminal was confirmed NOT to reliably provide. Launching it
+        # right after install, via a postInstallCommand declared on the catalog entry, gets that
+        # console started immediately instead of leaving the user to remember a manual step.
+        $debianPackage = [pscustomobject]@{ Key = "debian"; content = "Debian (WSL)"; winget = "Debian.Debian"; postInstallCommand = 'Set-Variable -Name postInstallRan -Value $true -Scope Script' }
+        New-WinUtilInstallTestContext -Packages @($debianPackage)
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Winget @("Debian.Debian") -Choco @()
+        }
+        Mock Install-WinUtilProgramWinget { @([pscustomobject]@{ Program = "Debian.Debian"; Success = $true; ExitCode = 0 }) }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($debianPackage) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Message -like "Running post-install step for Debian (WSL)*"
+        }
+        $script:postInstallRan | Should -BeTrue
+
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "does not run postInstallCommand when the winget install itself fails" {
+        $debianPackage = [pscustomobject]@{ Key = "debian"; content = "Debian (WSL)"; winget = "Debian.Debian"; postInstallCommand = 'Set-Variable -Name postInstallRan -Value $true -Scope Script' }
+        New-WinUtilInstallTestContext -Packages @($debianPackage)
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Winget @("Debian.Debian") -Choco @()
+        }
+        Mock Install-WinUtilProgramWinget { @([pscustomobject]@{ Program = "Debian.Debian"; Success = $false; ExitCode = 1 }) }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($debianPackage) -ManagerPreference "Winget"
+
+        $script:postInstallRan | Should -BeNullOrEmpty
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
     }
 
     It "installs WSL2/Debian before winget/choco, so Docker Desktop doesn't try to install before its own WSL2 prerequisite is even enabled" {

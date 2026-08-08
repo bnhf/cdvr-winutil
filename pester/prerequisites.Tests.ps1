@@ -17,6 +17,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilWSLFeatureEnabled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilVirtualizationFirmwareEnabled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilProgramInstalled.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPackagesInDependencyOrder.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPrerequisites.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPackagePrompts.ps1")
 

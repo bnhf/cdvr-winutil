@@ -109,10 +109,15 @@ function Resolve-WinUtilPrerequisites {
         }
     }
 
+    # Packages sharing the same install bucket (e.g. Docker Desktop and Debian both installing
+    # via winget) had no ordering relative to each other before this - see
+    # Get-WinUtilPackagesInDependencyOrder.ps1 for the confirmed real case that prompted it.
+    $orderedResult = Get-WinUtilPackagesInDependencyOrder -Packages @($result)
+
     # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
     # function-return boundary, and $null then fails to bind to Resolve-WinUtilPackagePrompts's
     # mandatory [object[]] parameter (e.g. every selected package had a declined/blocked
     # prerequisite) - a ParameterArgumentValidationErrorNullNotAllowed exception instead of the
     # intended "nothing left to install" no-op.
-    return ,$result.ToArray()
+    return ,$orderedResult
 }
