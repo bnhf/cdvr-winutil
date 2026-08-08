@@ -19,8 +19,8 @@ Function Install-WinUtilWSLDistro {
 
         Write-WinUtilLog -Component "Package" -Message "Installing WSL distro $distro ($name)"
         try {
-            $output = & wsl --install -d $distro 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --install -d $distro 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install -d $distro completed with no console output)" })
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install WSL distro ${distro}: $_"
         }

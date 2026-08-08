@@ -28,8 +28,8 @@ Function Uninstall-WinUtilWSLDistro {
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
         try {
             & wsl --terminate $distro 2>&1 | Out-Null
-            $output = & wsl --unregister $distro 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --unregister $distro 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --unregister $distro completed with no console output)" })
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to unregister WSL distro ${distro}: $_"
         }

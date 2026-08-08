@@ -16,6 +16,7 @@ function Write-WinUtilLog {
     #>
     param (
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Message,
 
         [ValidateSet("INFO", "WARN", "ERROR", "DEBUG")]

@@ -1432,8 +1432,8 @@ Function Install-WinUtilFeatureWSL {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
         try {
-            $output = & wsl --install --no-distribution 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install completed with no console output)" })
             Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: if this is the first time WSL has been enabled on this machine, a restart may be required before it is usable."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to enable WSL: $_"
@@ -1963,8 +1963,8 @@ Function Install-WinUtilWSLCommand {
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
         try {
             Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
-            $output = & wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
             Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run $($Action.ToLower()) for ${name}: $_"
@@ -1995,8 +1995,8 @@ Function Install-WinUtilWSLDistro {
 
         Write-WinUtilLog -Component "Package" -Message "Installing WSL distro $distro ($name)"
         try {
-            $output = & wsl --install -d $distro 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --install -d $distro 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install -d $distro completed with no console output)" })
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install WSL distro ${distro}: $_"
         }
@@ -6305,16 +6305,20 @@ function Test-WinUtilWSLFeatureEnabled {
 Function Uninstall-WinUtilFeatureWSL {
     <#
     .SYNOPSIS
-        Uninstalls the WSL2 platform: stops any running distros, unregisters the distro(s)
-        WinUtil's own catalog manages (e.g. Debian), then runs "wsl --uninstall".
+        Uninstalls the WSL2 platform: after confirming with the user, stops and unregisters
+        the distro(s) WinUtil's own catalog manages (e.g. Debian) that are actually currently
+        registered, then runs "wsl --uninstall".
 
     .DESCRIPTION
-        Only unregisters distros declared in WinUtil's own catalog (installType "wslDistro") -
-        never anything else that might be registered on this machine, since that data isn't
-        ours to delete. "wsl --uninstall" itself doesn't require every distro to be gone first;
-        it removes the WSL runtime/app regardless, and any distro left registered (e.g. one the
-        user set up themselves, outside WinUtil) is left orphaned - not usable via wsl until the
-        runtime is reinstalled, but not deleted either.
+        Only ever unregisters distros declared in WinUtil's own catalog (installType
+        "wslDistro") - never anything else that might be registered on this machine, since that
+        data isn't ours to delete. Unregistering permanently deletes that distro's filesystem,
+        so - unlike every other step here - this specifically asks for a Yes/No confirmation
+        before doing it (via Invoke-WPFUIThread, since this runs in the background install
+        runspace, not the UI thread) rather than treating it as an implicit side effect of
+        uninstalling WSL2. Declining leaves the distro registered (orphaned once the WSL runtime
+        below is gone, but not deleted) - "wsl --uninstall" doesn't require every distro to be
+        gone first; it removes the WSL runtime/app regardless.
 
         Does not disable the underlying Windows optional features (Microsoft-Windows-Subsystem-
         Linux, VirtualMachinePlatform) - "wsl --uninstall" doesn't touch those, and turning them
@@ -6326,8 +6330,21 @@ Function Uninstall-WinUtilFeatureWSL {
     )
 
     $ownedDistros = @($sync.configs.applicationsHashtable.Values | Where-Object { $_.installType -eq "wslDistro" })
-    if ($ownedDistros.Count -gt 0) {
-        Uninstall-WinUtilWSLDistro -Packages $ownedDistros
+    $registeredOwnedDistros = @($ownedDistros | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_.distro) -and (Test-WinUtilWSLDistroInstalled -Distro $_.distro)
+    })
+
+    if ($registeredOwnedDistros.Count -gt 0) {
+        $distroNames = ($registeredOwnedDistros | ForEach-Object { $_.content }) -join ", "
+        $confirmed = Invoke-WPFUIThread -ScriptBlock {
+            (Show-WinUtilMessage -Message "Uninstalling WSL2 will also permanently delete the following WSL distro(s) and all data inside them:`n - $distroNames`n`nDelete them now?" -Title "Confirm WSL distro deletion" -Button ([System.Windows.MessageBoxButton]::YesNo) -Icon "Warning") -eq [System.Windows.MessageBoxResult]::Yes
+        }
+
+        if ($confirmed) {
+            Uninstall-WinUtilWSLDistro -Packages $registeredOwnedDistros
+        } else {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Skipping deletion of $distroNames - declined. Left registered (will become orphaned, not deleted, once the WSL2 runtime below is uninstalled)."
+        }
     }
 
     foreach ($package in $Packages) {
@@ -6335,8 +6352,8 @@ Function Uninstall-WinUtilFeatureWSL {
         Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
         try {
             & wsl --shutdown 2>&1 | Out-Null
-            $output = & wsl --uninstall 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --uninstall 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --uninstall completed with no console output)" })
             Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: this removes the WSL runtime, not the underlying Windows optional features (Microsoft-Windows-Subsystem-Linux, VirtualMachinePlatform) - turn those off separately in Windows Features if you want WSL2 fully disabled."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall WSL2: $_"
@@ -6470,8 +6487,8 @@ Function Uninstall-WinUtilWSLDistro {
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
         try {
             & wsl --terminate $distro 2>&1 | Out-Null
-            $output = & wsl --unregister $distro 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --unregister $distro 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --unregister $distro completed with no console output)" })
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to unregister WSL distro ${distro}: $_"
         }
@@ -6511,6 +6528,7 @@ function Write-WinUtilLog {
     #>
     param (
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Message,
 
         [ValidateSet("INFO", "WARN", "ERROR", "DEBUG")]
@@ -8785,7 +8803,17 @@ function Invoke-WPFUIElements {
 }
 
 function Invoke-WPFUIThread ($ScriptBlock) {
-    $sync.form.Dispatcher.Invoke([action]$ScriptBlock)
+    <#
+    .SYNOPSIS
+        Runs a scriptblock synchronously on the UI thread and returns its result.
+
+    .DESCRIPTION
+        Cast to Func[object] rather than Action - Action forces a void return, discarding
+        anything the scriptblock produces. Existing callers already ignore the return value, so
+        this is purely additive: it lets a caller in the background runspace show a modal (e.g.
+        a Yes/No confirmation) and get the answer back, which Action couldn't do.
+    #>
+    $sync.form.Dispatcher.Invoke([Func[object]]$ScriptBlock)
 }
 
 function Invoke-WPFUltimatePerformance ([switch]$Enable) {

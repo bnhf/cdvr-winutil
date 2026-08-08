@@ -45,8 +45,8 @@ Function Install-WinUtilWSLCommand {
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
         try {
             Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
-            $output = & wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
             Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run $($Action.ToLower()) for ${name}: $_"

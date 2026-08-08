@@ -13,8 +13,8 @@ Function Install-WinUtilFeatureWSL {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
         try {
-            $output = & wsl --install --no-distribution 2>&1 | Out-String
-            Write-WinUtilLog -Component "Package" -Message $output.Trim()
+            $output = (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+            Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(wsl --install completed with no console output)" })
             Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: if this is the first time WSL has been enabled on this machine, a restart may be required before it is usable."
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to enable WSL: $_"
