@@ -42,10 +42,30 @@ function Invoke-WPFUnInstall {
 
         $packagesWinget = $packagesSorted['Winget']
         $packagesChoco = $packagesSorted['Choco']
-        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count
+        $packagesNpm = $packagesSorted['Npm']
+
+        # Packages whose uninstall isn't automated - WSL commands with no declared
+        # uninstallCommand, plus direct/github (arbitrary third-party installers with no known
+        # uninstaller) and the WSL feature/distro themselves (removing those is a system-wide,
+        # hard-to-reverse change well beyond "uninstall this one app" - not done implicitly).
+        $unsupported = [System.Collections.Generic.List[string]]::new()
+        $packagesWslCommand = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['WslCommand'])) {
+            if ($p -and -not [string]::IsNullOrWhiteSpace($p.uninstallCommand)) {
+                $packagesWslCommand.Add($p)
+            } elseif ($p) {
+                $unsupported.Add($p.content)
+            }
+        }
+        foreach ($p in @($packagesSorted['Direct'])) { if ($p) { $unsupported.Add($p.content) } }
+        foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
+        foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
+        foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
+
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesWslCommand).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), wslCommand=$(@($packagesWslCommand).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -95,6 +115,47 @@ function Invoke-WPFUnInstall {
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
+            if ($packagesNpm.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling npm packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Install-WinUtilProgramNpm -Action Uninstall -Packages $packagesNpm
+                $completedPackages += @($packagesNpm).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled npm packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+            if ($packagesWslCommand.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL command packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Install-WinUtilWSLCommand -Action Uninstall -Packages $packagesWslCommand
+                $completedPackages += @($packagesWslCommand).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled WSL command packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
+            if ($unsupported.Count -gt 0) {
+                $unsupportedList = $unsupported -join "`n - "
+                Write-WinUtilLog -Level "WARN" -Component "Uninstall" -Message "Not uninstalled (no automatic uninstall available): $($unsupported -join ', ')"
+                if ($hasUI) {
+                    Invoke-WPFUIThread -ScriptBlock {
+                        Show-WinUtilMessage -Message "These weren't uninstalled - there's no automatic uninstall for them yet, remove manually if needed:`n - $unsupportedList" -Title "Some apps were skipped" -Button "OK" -Icon "Warning"
+                    }
+                }
+            }
+
             Write-Host "==========================================="
             Write-Host "--       Uninstalls have finished       ---"
             Write-Host "==========================================="

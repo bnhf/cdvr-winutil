@@ -1475,10 +1475,13 @@ Function Install-WinUtilProgramGithub {
 Function Install-WinUtilProgramNpm {
     <#
     .SYNOPSIS
-        Installs a global npm package. Requires Node.js/npm to already be on PATH -
-        packages using this installType should declare "nodejs" in their "requires".
+        Installs or uninstalls a global npm package. Requires Node.js/npm to already be on
+        PATH - packages using this installType should declare "nodejs" in their "requires".
     #>
     param (
+        [ValidateSet("Install", "Uninstall")]
+        [string]$Action = "Install",
+
         [Parameter(Mandatory = $true)]
         [object[]]$Packages
     )
@@ -1488,18 +1491,19 @@ Function Install-WinUtilProgramNpm {
         $npmPackage = $package.npmPackage
 
         if ([string]::IsNullOrWhiteSpace($npmPackage)) {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "npm install for $name is missing npmPackage."
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "npm $($Action.ToLower()) for $name is missing npmPackage."
             continue
         }
 
         if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "npm is not on PATH - install Node.js first, then retry $name."
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "npm is not on PATH - can't $($Action.ToLower()) $name."
             continue
         }
 
-        Write-WinUtilLog -Component "Package" -Message "Installing $name via npm ($npmPackage)"
-        $process = Start-Process -FilePath "npm" -ArgumentList @("install", "-g", $npmPackage) -NoNewWindow -Wait -PassThru
-        Write-WinUtilLog -Component "Package" -Message "$name npm install completed (exit code: $($process.ExitCode))"
+        $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
+        Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
+        $process = Start-Process -FilePath "npm" -ArgumentList @($npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
+        Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
     }
 }
 
@@ -1559,8 +1563,9 @@ function Install-WinUtilWinget {
 Function Install-WinUtilWSLCommand {
     <#
     .SYNOPSIS
-        Runs a bash command inside a WSL distro, substituting any {{NAME}} tokens with
-        values collected earlier (via Resolve-WinUtilPackagePrompts, on the UI thread).
+        Runs a bash command inside a WSL distro - the install command with {{NAME}} tokens
+        substituted from values collected earlier (via Resolve-WinUtilPackagePrompts, on the
+        UI thread), or the uninstallCommand as-is when -Action Uninstall.
 
     .DESCRIPTION
         The command is written to a temp .sh file and placed into the target distro via
@@ -1569,6 +1574,9 @@ Function Install-WinUtilWSLCommand {
         `wsl -d <distro> -- bash -c "..."`.
     #>
     param (
+        [ValidateSet("Install", "Uninstall")]
+        [string]$Action = "Install",
+
         [Parameter(Mandatory = $true)]
         [object[]]$Packages
     )
@@ -1576,28 +1584,34 @@ Function Install-WinUtilWSLCommand {
     foreach ($package in $Packages) {
         $name = $package.content
         $distro = $package.distro
-        $command = $package.command
+        $command = if ($Action -eq "Uninstall") { $package.uninstallCommand } else { $package.command }
 
         if ([string]::IsNullOrWhiteSpace($distro) -or [string]::IsNullOrWhiteSpace($command)) {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "WSL command install for $name is missing distro/command."
+            if ($Action -eq "Uninstall") {
+                Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name has no uninstallCommand defined - not uninstalled. Remove it manually if needed."
+            } else {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "WSL command install for $name is missing distro/command."
+            }
             continue
         }
 
-        foreach ($promptValue in $package.PromptValues.GetEnumerator()) {
-            $command = $command.Replace("{{$($promptValue.Key)}}", $promptValue.Value)
+        if ($package.PromptValues) {
+            foreach ($promptValue in $package.PromptValues.GetEnumerator()) {
+                $command = $command.Replace("{{$($promptValue.Key)}}", $promptValue.Value)
+            }
         }
 
-        $scriptName = "cdvr-$($package.Key).sh"
+        $scriptName = "cdvr-$($package.Key)-$($Action.ToLower()).sh"
         $wslTempPath = "\\wsl.localhost\$distro\tmp\$scriptName"
 
-        Write-WinUtilLog -Component "Package" -Message "Running $name inside WSL distro $distro"
+        Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
         try {
             Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
             $output = & wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String
             Write-WinUtilLog -Component "Package" -Message $output.Trim()
-            Write-WinUtilLog -Component "Package" -Message "$name completed."
+            Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
         } catch {
-            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run ${name}: $_"
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run $($Action.ToLower()) for ${name}: $_"
         } finally {
             Remove-Item -Path $wslTempPath -Force -ErrorAction SilentlyContinue
         }
@@ -7797,10 +7811,30 @@ function Invoke-WPFUnInstall {
 
         $packagesWinget = $packagesSorted['Winget']
         $packagesChoco = $packagesSorted['Choco']
-        $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count
+        $packagesNpm = $packagesSorted['Npm']
+
+        # Packages whose uninstall isn't automated - WSL commands with no declared
+        # uninstallCommand, plus direct/github (arbitrary third-party installers with no known
+        # uninstaller) and the WSL feature/distro themselves (removing those is a system-wide,
+        # hard-to-reverse change well beyond "uninstall this one app" - not done implicitly).
+        $unsupported = [System.Collections.Generic.List[string]]::new()
+        $packagesWslCommand = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['WslCommand'])) {
+            if ($p -and -not [string]::IsNullOrWhiteSpace($p.uninstallCommand)) {
+                $packagesWslCommand.Add($p)
+            } elseif ($p) {
+                $unsupported.Add($p.content)
+            }
+        }
+        foreach ($p in @($packagesSorted['Direct'])) { if ($p) { $unsupported.Add($p.content) } }
+        foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
+        foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $unsupported.Add($p.content) } }
+        foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $unsupported.Add($p.content) } }
+
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesWslCommand).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), wslCommand=$(@($packagesWslCommand).Count), unsupported=$($unsupported.Count)"
 
         try {
             $sync.ProcessRunning = $true
@@ -7850,6 +7884,47 @@ function Invoke-WPFUnInstall {
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
+            if ($packagesNpm.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling npm packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Install-WinUtilProgramNpm -Action Uninstall -Packages $packagesNpm
+                $completedPackages += @($packagesNpm).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled npm packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+            if ($packagesWslCommand.Count -gt 0) {
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL command packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                Install-WinUtilWSLCommand -Action Uninstall -Packages $packagesWslCommand
+                $completedPackages += @($packagesWslCommand).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled WSL command packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                }
+            }
+
+            if ($unsupported.Count -gt 0) {
+                $unsupportedList = $unsupported -join "`n - "
+                Write-WinUtilLog -Level "WARN" -Component "Uninstall" -Message "Not uninstalled (no automatic uninstall available): $($unsupported -join ', ')"
+                if ($hasUI) {
+                    Invoke-WPFUIThread -ScriptBlock {
+                        Show-WinUtilMessage -Message "These weren't uninstalled - there's no automatic uninstall for them yet, remove manually if needed:`n - $unsupportedList" -Title "Some apps were skipped" -Button "OK" -Icon "Warning"
+                    }
+                }
+            }
+
             Write-Host "==========================================="
             Write-Host "--       Uninstalls have finished       ---"
             Write-Host "==========================================="
@@ -8240,6 +8315,7 @@ $sync.configs.applications = @'
       }
     ],
     "command": "docker run -d --name olivetin-ezstart --pull always --add-host=host.docker.internal:host-gateway -p 1338:1337 -e EZ_START=-ezstart -e CHANNELS_DVR=host.docker.internal:8089 -e TZ=$(readlink /etc/localtime) -e HOST_DIR=$([[ \"$(uname)\" == \"Darwin\" ]] && echo \"$HOME\" || echo \"/data\") -e PORTAINER_PASSWORD='{{PORTAINER_PASSWORD}}' -v /config -v /var/run/docker.sock:/var/run/docker.sock bnhf/olivetin:latest",
+    "uninstallCommand": "docker rm -f olivetin-ezstart",
     "foss": false
   },
   "WPFInstalldvrdesk": {
