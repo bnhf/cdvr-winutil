@@ -21,6 +21,25 @@ function Resolve-WinUtilPrerequisites {
         if ($p.Key) { [void]$queuedKeys.Add([string]$p.Key) }
     }
 
+    # WSL2 needs hardware virtualization (Intel VT-x / AMD-V) enabled in firmware - unlike the
+    # Windows optional features it also needs, there's no "install this for you" fix since it's
+    # a BIOS/UEFI setting, so this runs before the normal requires-resolution below and drops
+    # WSL2 (and anything already queued that needs it: Debian, Docker Desktop, Olivetin) outright
+    # rather than offering the usual Yes/No prompt. Only a definite $false blocks anything - a
+    # $null result (can't be determined) is not evidence virtualization is actually unavailable.
+    $needsWsl2 = @($result) | Where-Object {
+        $_.installType -eq "wslFeature" -or ($_.requires -and $_.requires -contains "wsl2")
+    }
+    if ($needsWsl2.Count -gt 0 -and (Test-WinUtilVirtualizationFirmwareEnabled) -eq $false) {
+        $names = ($needsWsl2 | ForEach-Object { $_.content }) -join ", "
+        [void](Show-WinUtilMessage -Message "WSL2 requires hardware virtualization (Intel VT-x / AMD-V), which appears to be disabled in this PC's BIOS/UEFI firmware settings. Enable it there, then try again.`n`nSkipping: $names" -Title "Virtualization is disabled" -Button ([System.Windows.MessageBoxButton]::OK) -Icon "Warning")
+        Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping WSL2-dependent packages - hardware virtualization firmware appears disabled: $names"
+        foreach ($p in $needsWsl2) {
+            [void]$result.Remove($p)
+            if ($p.Key) { [void]$queuedKeys.Remove([string]$p.Key) }
+        }
+    }
+
     $toDrop = [System.Collections.Generic.List[object]]::new()
 
     foreach ($package in @($result)) {

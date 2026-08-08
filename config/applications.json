@@ -49,6 +49,7 @@
         "link": "https://www.docker.com/products/docker-desktop/",
         "handle": "Docker, Inc.",
         "winget": "Docker.DockerDesktop",
+        "requires": ["wsl2"],
         "foss": false
     },
     "nodejs": {
