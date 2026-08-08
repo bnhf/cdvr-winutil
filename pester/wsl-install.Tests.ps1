@@ -8,6 +8,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilFeatureWSL.ps1")
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilWSLDistro.ps1")
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilWSLCommand.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Test-WinUtilDockerAvailableInWSL.ps1")
 
     function wsl {
         param([Parameter(ValueFromRemainingArguments = $true)]$Arguments)
@@ -17,6 +18,8 @@ BeforeAll {
     }
     function Test-WinUtilWSLFeatureEnabled { $true }
     function Test-WinUtilWSLDistroInstalled { param($Distro) $true }
+    function Set-WinUtilNoBomFileContent { param($Path, $Value) }
+    function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
 }
 
 Describe "Install-WinUtilFeatureWSL" {
@@ -129,7 +132,7 @@ Describe "Install-WinUtilWSLCommand" {
         Mock Write-WinUtilLog { }
         Mock wsl { $global:LASTEXITCODE = 0 }
         Mock Invoke-WinUtilWithTimeout { & $ScriptBlock @ArgumentList }
-        Mock Set-Content { }
+        Mock Set-WinUtilNoBomFileContent { }
         Mock Remove-Item { }
     }
 
@@ -138,6 +141,34 @@ Describe "Install-WinUtilWSLCommand" {
         Install-WinUtilWSLCommand -Action Install -Packages @($package)
 
         Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -eq "Olivetin install completed." }
+    }
+
+    It "writes the script without a BOM, via Set-WinUtilNoBomFileContent rather than Set-Content" {
+        # Regression guard for a real production bug: Set-Content -Encoding UTF8 prepends a
+        # byte-order-mark under Windows PowerShell 5.1 (confirmed live), which bash doesn't
+        # strip, corrupting the first word of the script - "docker: command not found" was
+        # actually a mangled "<BOM>docker".
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run hello" }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Set-WinUtilNoBomFileContent -Times 1 -Exactly -ParameterFilter {
+            $Value -eq "docker run hello"
+        }
+    }
+
+    It "reports failure, not completion, when the command exits non-zero" {
+        # Regression guard for a real production bug: a failed docker command (exit 127,
+        # "command not found") was still logged as "install completed" - only the ABSENCE of
+        # output was treated as a failure before, not a non-zero exit code.
+        Mock wsl { $global:LASTEXITCODE = 127; "docker: command not found" }
+
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run hello" }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 0 -Exactly -ParameterFilter { $Message -eq "Olivetin install completed." }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "Olivetin install FAILED (exit code: 127)*"
+        }
     }
 
     It "warns instead of failing outright when the command times out" {
@@ -152,5 +183,79 @@ Describe "Install-WinUtilWSLCommand" {
             $Level -eq "WARN" -and $Message -like "Olivetin install did not finish*"
         }
         Should -Invoke -CommandName Write-WinUtilLog -Times 0 -Exactly -ParameterFilter { $Message -eq "Olivetin install completed." }
+    }
+
+    It "checks docker availability first when requiresDockerInDistro is set, and skips the install if it's not available" {
+        # Regression guard for the actual reported bug: Docker Desktop installed but WSL
+        # integration not enabled for Debian - running the install anyway just fails deep inside
+        # the script with a generic "command not found" that doesn't point at the real cause.
+        Mock Test-WinUtilDockerAvailableInWSL { [pscustomobject]@{ Available = $false; Reason = "docker not reachable - enable WSL integration" } }
+
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run hello"; requiresDockerInDistro = $true }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Test-WinUtilDockerAvailableInWSL -Times 1 -Exactly -ParameterFilter { $Distro -eq "Debian" }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -eq "Skipping Olivetin install - docker not reachable - enable WSL integration"
+        }
+        Should -Invoke -CommandName wsl -Times 0 -Exactly
+        Should -Invoke -CommandName Set-WinUtilNoBomFileContent -Times 0 -Exactly
+    }
+
+    It "proceeds normally when requiresDockerInDistro is set and docker is available" {
+        Mock Test-WinUtilDockerAvailableInWSL { [pscustomobject]@{ Available = $true; Reason = $null } }
+
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run hello"; requiresDockerInDistro = $true }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -eq "Olivetin install completed." }
+    }
+
+    It "does not check docker availability for Uninstall, even when requiresDockerInDistro is set" {
+        # If docker was reachable when this installed, gating the cleanup step on it too would
+        # only ever block the user from removing something, for no benefit.
+        Mock Test-WinUtilDockerAvailableInWSL { [pscustomobject]@{ Available = $false; Reason = "n/a" } }
+
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; uninstallCommand = "docker rm -f olivetin"; requiresDockerInDistro = $true }
+        Install-WinUtilWSLCommand -Action Uninstall -Packages @($package)
+
+        Should -Invoke -CommandName Test-WinUtilDockerAvailableInWSL -Times 0 -Exactly
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -eq "Olivetin uninstall completed." }
+    }
+}
+
+Describe "Test-WinUtilDockerAvailableInWSL" {
+    BeforeEach {
+        Mock wsl { $global:LASTEXITCODE = 0 }
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock @ArgumentList }
+    }
+
+    It "reports available when the docker CLI is present and the daemon is reachable" {
+        $result = Test-WinUtilDockerAvailableInWSL -Distro "Debian"
+
+        $result.Available | Should -BeTrue
+        $result.Reason | Should -BeNullOrEmpty
+    }
+
+    It "reports a specific reason when the docker CLI isn't present" {
+        # This is the actual reported scenario: Docker Desktop installed, but WSL integration
+        # not enabled for the target distro, so "docker" doesn't exist there at all.
+        Mock wsl { $global:LASTEXITCODE = 127 } -ParameterFilter { ($Arguments -join " ") -like "*command -v docker*" }
+
+        $result = Test-WinUtilDockerAvailableInWSL -Distro "Debian"
+
+        $result.Available | Should -BeFalse
+        $result.Reason | Should -BeLike "*isn't available inside the Debian*"
+        $result.Reason | Should -BeLike "*WSL Integration*"
+    }
+
+    It "reports a different, specific reason when the CLI exists but the daemon isn't reachable" {
+        Mock wsl { $global:LASTEXITCODE = 0 } -ParameterFilter { ($Arguments -join " ") -like "*command -v docker*" }
+        Mock wsl { $global:LASTEXITCODE = 1 } -ParameterFilter { ($Arguments -join " ") -like "*docker info*" }
+
+        $result = Test-WinUtilDockerAvailableInWSL -Distro "Debian"
+
+        $result.Available | Should -BeFalse
+        $result.Reason | Should -BeLike "*can't reach the Docker daemon*"
     }
 }

@@ -2052,6 +2052,27 @@ Function Install-WinUtilWSLCommand {
         quoting problems of passing a command with embedded $(...) and quotes through
         `wsl -d <distro> -- bash -c "..."`.
 
+        Written via Set-WinUtilNoBomFileContent, not Set-Content -Encoding UTF8 - see that
+        function's own docstring for why: confirmed live, Set-Content's UTF8 encoding prepended
+        a byte-order-mark under Windows PowerShell 5.1 (not PowerShell 7+, same command),
+        corrupting the first word of the script - a "docker: command not found" error was
+        actually a mangled "<BOM>docker", the literal docker install/uninstall command was
+        correct, the file it ended up in wasn't.
+
+        If the package declares requiresDockerInDistro, checks that "docker" is actually
+        reachable inside the target distro BEFORE running its command, via
+        Test-WinUtilDockerAvailableInWSL - Docker Desktop being installed doesn't mean WSL
+        integration is enabled for this specific distro, and running the command anyway just
+        fails with a generic, deep-in-the-script "command not found" that doesn't point at the
+        actual cause. Only meaningful for Install - if docker was reachable when this installed,
+        there's no reason to gate uninstall on it too (and doing so would only ever block a
+        cleanup step the user is trying to run, for no benefit).
+
+        Checks the wsl.exe call's real exit code rather than assuming success whenever it
+        produces any output - confirmed live: a failed docker command (exit code 127, "command
+        not found") was still logged as "install completed", because only the ABSENCE of output
+        was treated as a problem before, not a non-zero exit code.
+
         Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
         used elsewhere for quick DISM/registry checks - these commands can do real work (e.g.
         pulling a Docker image) that legitimately takes a while, and wsl.exe itself can hang for
@@ -2082,6 +2103,14 @@ Function Install-WinUtilWSLCommand {
             continue
         }
 
+        if ($Action -eq "Install" -and $package.requiresDockerInDistro) {
+            $dockerCheck = Test-WinUtilDockerAvailableInWSL -Distro $distro
+            if (-not $dockerCheck.Available) {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Skipping $name install - $($dockerCheck.Reason)"
+                continue
+            }
+        }
+
         if ($package.PromptValues) {
             foreach ($promptValue in $package.PromptValues.GetEnumerator()) {
                 $command = $command.Replace("{{$($promptValue.Key)}}", $promptValue.Value)
@@ -2093,26 +2122,32 @@ Function Install-WinUtilWSLCommand {
 
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
         try {
-            Set-Content -Path $wslTempPath -Value $command -NoNewline -Encoding UTF8 -ErrorAction Stop
+            Set-WinUtilNoBomFileContent -Path $wslTempPath -Value $command
 
-            $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -OnWaitingIntervalSeconds 20 -OnWaiting {
+            $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -OnWaitingIntervalSeconds 20 -OnWaiting {
                 param($elapsedSeconds)
                 Write-WinUtilLog -Component "Package" -Message "Still running $name $($Action.ToLower()) inside WSL ($($elapsedSeconds)s elapsed) - this can take a while."
                 Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..."
             } -ScriptBlock {
                 param($distro, $scriptName)
                 try {
-                    return (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+                    $scriptOutput = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+                    return [pscustomobject]@{ Output = $scriptOutput; ExitCode = $LASTEXITCODE }
                 } catch {
-                    return $null
+                    return [pscustomobject]@{ Output = $null; ExitCode = -1 }
                 }
             }
 
-            if ($null -eq $output) {
+            if ($null -eq $result) {
                 Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name $($Action.ToLower()) did not finish within the expected time - it may still be running inside WSL, or may need interactive input this app can't provide."
-            } else {
-                Write-WinUtilLog -Component "Package" -Message $(if ($output) { $output } else { "(command completed with no console output)" })
+                continue
+            }
+
+            Write-WinUtilLog -Component "Package" -Message $(if ($result.Output) { $result.Output } else { "(command completed with no console output)" })
+            if ($result.ExitCode -eq 0) {
                 Write-WinUtilLog -Component "Package" -Message "$name $($Action.ToLower()) completed."
+            } else {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$name $($Action.ToLower()) FAILED (exit code: $($result.ExitCode)) - see the output above for the reason."
             }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run $($Action.ToLower()) for ${name}: $_"
@@ -5346,6 +5381,40 @@ function Set-WinUtilDNS {
     }
 }
 
+function Set-WinUtilNoBomFileContent {
+    <#
+    .SYNOPSIS
+        Writes text to a file as UTF-8 without a byte-order-mark, regardless of PowerShell
+        version/host.
+
+    .DESCRIPTION
+        Set-Content -Encoding UTF8 is not consistent across PowerShell versions - confirmed
+        live: Windows PowerShell 5.1 prepends a BOM (bytes EF BB BF) for "UTF8", PowerShell 7+
+        does not, for the exact same command. A BOM at the start of a file bash then reads as a
+        script corrupts its first word, since bash doesn't strip it - this is exactly what
+        Install-WinUtilWSLCommand.ps1 hit: a WSL install command starting with "docker" failed
+        with "command not found", because the actual first bytes bash saw were the BOM followed
+        by "docker", not "docker" itself.
+
+        A thin wrapper around [System.IO.File]::WriteAllText with an explicit
+        UTF8Encoding($false), rather than calling that directly at each use site - Pester can
+        mock a PowerShell function, but not a static .NET method call, so call sites that need
+        to be testable (without actually writing through a real \\wsl.localhost UNC path) go
+        through this instead of the raw .NET API.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $noBomUtf8 = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($Path, $Value, $noBomUtf8)
+}
+
 function Set-WinUtilProcessForeground {
     <#
     .SYNOPSIS
@@ -6339,6 +6408,77 @@ try {
             if ($f -and (Test-Path $f)) { Remove-Item -Path $f -Force -ErrorAction SilentlyContinue }
         }
     }
+}
+
+function Test-WinUtilDockerAvailableInWSL {
+    <#
+    .SYNOPSIS
+        Checks whether the "docker" CLI is actually reachable and working inside a given WSL
+        distro - not just that Docker Desktop itself is installed.
+
+    .DESCRIPTION
+        Resolve-WinUtilPrerequisites already confirms Docker Desktop is installed before letting
+        anything that "requires" it proceed, but installing the app doesn't automatically enable
+        WSL integration for any particular distro - that's a separate, manual toggle in Docker
+        Desktop's own Settings > Resources > WSL Integration, easy to miss. Without it, the
+        "docker" command simply doesn't exist inside that distro at all - confirmed live: an
+        Olivetin install failed with "docker: command not found" deep inside its own install
+        script, with nothing pointing at the actual cause or fix.
+
+        Distinguishes two different failure modes with two different fixes, rather than one
+        generic "docker isn't available" message:
+          - The "docker" command itself isn't on PATH in the distro - WSL integration isn't
+            enabled for it.
+          - "docker" exists but can't reach the daemon - Docker Desktop isn't running, or is
+            still starting up.
+
+        Bounded via Invoke-WinUtilWithTimeout, matching every other wsl.exe call in this app -
+        the same class of hang risk applies here as anywhere else that shells out to wsl.exe.
+
+    .OUTPUTS
+        A [pscustomobject] with .Available ($true/$false) and .Reason - a specific, actionable
+        message when .Available is $false, or $null when it's $true.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Distro
+    )
+
+    $cliPresent = Invoke-WinUtilWithTimeout -TimeoutSeconds 15 -DefaultValue $false -ArgumentList @($Distro) -ScriptBlock {
+        param($Distro)
+        try {
+            & wsl -d $Distro -- bash -c "command -v docker" 2>&1 | Out-Null
+            return $LASTEXITCODE -eq 0
+        } catch {
+            return $false
+        }
+    }
+
+    if (-not $cliPresent) {
+        return [pscustomobject]@{
+            Available = $false
+            Reason = "The 'docker' command isn't available inside the $Distro WSL distro. In Docker Desktop, go to Settings > Resources > WSL Integration and enable integration for '$Distro', then try again."
+        }
+    }
+
+    $daemonReachable = Invoke-WinUtilWithTimeout -TimeoutSeconds 15 -DefaultValue $false -ArgumentList @($Distro) -ScriptBlock {
+        param($Distro)
+        try {
+            & wsl -d $Distro -- docker info 2>&1 | Out-Null
+            return $LASTEXITCODE -eq 0
+        } catch {
+            return $false
+        }
+    }
+
+    if (-not $daemonReachable) {
+        return [pscustomobject]@{
+            Available = $false
+            Reason = "The 'docker' command is available inside $Distro, but can't reach the Docker daemon. Make sure Docker Desktop is running and has finished starting, then try again."
+        }
+    }
+
+    return [pscustomobject]@{ Available = $true; Reason = $null }
 }
 
 function Test-WinUtilPackageManager {
@@ -9835,6 +9975,16 @@ $sync.configs.applications = @'
     "winget": "Devolutions.UniGetUI",
     "foss": true
   },
+  "WPFInstallpowershell7": {
+    "category": "Foundational",
+    "content": "PowerShell 7",
+    "description": "The current, cross-platform PowerShell (pwsh) - installs alongside Windows PowerShell 5.1 rather than replacing it. Some things this app has to work around only happen under 5.1 (e.g. Set-Content -Encoding UTF8 silently adding a byte-order-mark that 7+ doesn't add), so it's worth having available.",
+    "link": "https://github.com/PowerShell/PowerShell",
+    "icon": "https://raw.githubusercontent.com/PowerShell/PowerShell/master/assets/Powershell_256.png",
+    "handle": "Microsoft Corporation",
+    "winget": "Microsoft.PowerShell",
+    "foss": true
+  },
   "WPFInstallwindowsterminal": {
     "category": "Foundational",
     "choco": "microsoft-windows-terminal",
@@ -9964,6 +10114,7 @@ $sync.configs.applications = @'
       "debian",
       "dockerdesktop"
     ],
+    "requiresDockerInDistro": true,
     "prompts": [
       {
         "name": "PORTAINER_PASSWORD",
@@ -10026,14 +10177,14 @@ $sync.configs.applications = @'
   },
   "WPFInstallrustdvr": {
     "category": "Channels DVR Windows Clients",
-    "content": "RustDVR",
-    "description": "Native Win32 client for Channels DVR written in Rust with WinUI3 styling, by mackid1993. Not affiliated or endorsed by Fancy Bits LLC. Early release (v0.0.1).",
-    "link": "https://github.com/mackid1993/RustDVR",
+    "content": "Clicker",
+    "description": "Native Win32 client for Channels DVR written in Rust with WinUI3 styling, by mackid1993 (formerly RustDVR). Not affiliated or endorsed by Fancy Bits LLC.",
+    "link": "https://github.com/mackid1993/Clicker",
     "icon": "https://git-scm.com/images/logos/downloads/Git-Icon-1788C.png",
     "handle": "@mackid1993",
     "installType": "github",
-    "repo": "mackid1993/RustDVR",
-    "assetPattern": "RustDVR-Setup-*.exe",
+    "repo": "mackid1993/Clicker",
+    "assetPattern": "Clicker-Setup-*.exe",
     "foss": true
   },
   "WPFInstallplutoforchannels": {

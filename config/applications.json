@@ -20,6 +20,16 @@
         "winget": "Devolutions.UniGetUI",
         "foss": true
     },
+    "powershell7": {
+        "category": "Foundational",
+        "content": "PowerShell 7",
+        "description": "The current, cross-platform PowerShell (pwsh) - installs alongside Windows PowerShell 5.1 rather than replacing it. Some things this app has to work around only happen under 5.1 (e.g. Set-Content -Encoding UTF8 silently adding a byte-order-mark that 7+ doesn't add), so it's worth having available.",
+        "link": "https://github.com/PowerShell/PowerShell",
+        "icon": "https://raw.githubusercontent.com/PowerShell/PowerShell/master/assets/Powershell_256.png",
+        "handle": "Microsoft Corporation",
+        "winget": "Microsoft.PowerShell",
+        "foss": true
+    },
     "windowsterminal": {
         "category": "Foundational",
         "choco": "microsoft-windows-terminal",
@@ -140,6 +150,7 @@
         "installType": "wslCommand",
         "distro": "Debian",
         "requires": ["wsl2", "debian", "dockerdesktop"],
+        "requiresDockerInDistro": true,
         "prompts": [
             { "name": "PORTAINER_PASSWORD", "label": "Desired Portainer password (12 character minimum)", "secret": true, "minLength": 12 }
         ],
@@ -197,14 +208,14 @@
     },
     "rustdvr": {
         "category": "Channels DVR Windows Clients",
-        "content": "RustDVR",
-        "description": "Native Win32 client for Channels DVR written in Rust with WinUI3 styling, by mackid1993. Not affiliated or endorsed by Fancy Bits LLC. Early release (v0.0.1).",
-        "link": "https://github.com/mackid1993/RustDVR",
+        "content": "Clicker",
+        "description": "Native Win32 client for Channels DVR written in Rust with WinUI3 styling, by mackid1993 (formerly RustDVR). Not affiliated or endorsed by Fancy Bits LLC.",
+        "link": "https://github.com/mackid1993/Clicker",
         "icon": "https://git-scm.com/images/logos/downloads/Git-Icon-1788C.png",
         "handle": "@mackid1993",
         "installType": "github",
-        "repo": "mackid1993/RustDVR",
-        "assetPattern": "RustDVR-Setup-*.exe",
+        "repo": "mackid1993/Clicker",
+        "assetPattern": "Clicker-Setup-*.exe",
         "foss": true
     },
     "plutoforchannels": {
