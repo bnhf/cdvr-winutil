@@ -23,6 +23,9 @@ BeforeAll {
     function Test-WinUtilWSLDistroInstalled { param($Distro) $false }
     function Show-WinUtilMessage { param($Message, $Title, $Button, $Icon) }
     function Write-WinUtilLog { }
+    function wsl {
+        param([Parameter(ValueFromRemainingArguments = $true)]$Arguments)
+    }
 }
 
 # Test-WinUtilWSLFeatureEnabled and Test-WinUtilVirtualizationFirmwareEnabled now run their real
@@ -88,9 +91,48 @@ Describe "Test-WinUtilWSLFeatureEnabled" {
                 [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
             )
         }
+        Mock wsl { $global:LASTEXITCODE = 0 }
         Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
         Test-WinUtilWSLFeatureEnabled | Should -Be $true
         Should -Invoke -CommandName Get-WindowsOptionalFeature -Times 1 -Exactly
+    }
+
+    It "returns false when wsl --status reports a non-zero exit code, even though the optional features are enabled" {
+        # Regression guard for a real report: right after uninstalling WSL2 through WinUtil in a
+        # PREVIOUS app session (so the WSLRuntimeUninstalled session flag no longer applies),
+        # Show Installed Apps still reported WSL2 as installed, even though "wsl --status" said
+        # "The Windows Subsystem for Linux is not installed" and exited with code 50 - confirmed
+        # live on the affected machine. The optional features alone don't catch this, since
+        # "wsl --uninstall" doesn't disable them.
+        Mock Get-WindowsOptionalFeature {
+            @(
+                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
+                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
+            )
+        }
+        Mock wsl { $global:LASTEXITCODE = 50 }
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
+
+        Test-WinUtilWSLFeatureEnabled | Should -Be $false
+    }
+
+    It "runs wsl --status once, not once per feature, alongside the single Get-WindowsOptionalFeature call" {
+        # Regression guard: both checks share the one Invoke-WinUtilWithTimeout call rather than
+        # each getting their own - two bounded external calls would double the worst-case
+        # latency of a function Resolve-WinUtilPrerequisites calls synchronously on the UI
+        # thread.
+        Mock Get-WindowsOptionalFeature {
+            @(
+                [pscustomobject]@{ FeatureName = "Microsoft-Windows-Subsystem-Linux"; State = "Enabled" }
+                [pscustomobject]@{ FeatureName = "VirtualMachinePlatform"; State = "Enabled" }
+            )
+        }
+        Mock wsl { $global:LASTEXITCODE = 0 }
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
+
+        Test-WinUtilWSLFeatureEnabled | Should -Be $true
+        Should -Invoke -CommandName wsl -Times 1 -Exactly
+        Should -Invoke -CommandName Invoke-WinUtilWithTimeout -Times 1 -Exactly
     }
 }
 
