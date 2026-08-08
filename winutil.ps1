@@ -1377,7 +1377,8 @@ Function Install-WinUtilProgramDirect {
                 # application on completion that never exits, which would make -Wait block
                 # forever. Launch and move on instead of waiting; don't delete the downloaded
                 # file since the process may still be reading it after we return.
-                Start-Process -FilePath $dest
+                $proc = Start-Process -FilePath $dest -PassThru
+                Set-WinUtilProcessForeground -Process $proc
                 Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
             } else {
                 Start-Process -FilePath $dest -ArgumentList $installArgs -Wait
@@ -1462,7 +1463,8 @@ Function Install-WinUtilProgramGithub {
                 # application on completion that never exits, which would make -Wait block
                 # forever. Launch and move on instead of waiting; don't delete the downloaded
                 # file since the process may still be reading it after we return.
-                Start-Process -FilePath $dest
+                $proc = Start-Process -FilePath $dest -PassThru
+                Set-WinUtilProcessForeground -Process $proc
                 Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
             }
         } catch {
@@ -4551,6 +4553,55 @@ function Set-WinUtilDNS {
     }
 }
 
+function Set-WinUtilProcessForeground {
+    <#
+    .SYNOPSIS
+        Brings a just-started process's main window to the foreground.
+
+    .DESCRIPTION
+        Interactive installers launched from WinUtil's background install runspace don't
+        reliably get Windows' automatic foreground grant - that's tied to whichever thread
+        most recently received user input (the UI thread that handled the button click), not
+        the background thread that actually calls Start-Process. Polls briefly for the new
+        process's main window to appear, then explicitly foregrounds it. Uses the well-known
+        ALT-keypress workaround for SetForegroundWindow's foreground-lock restriction (a
+        simulated key event satisfies the "was this the last input" check Windows applies).
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+
+        [int]$TimeoutSeconds = 15
+    )
+
+    if (-not ([System.Management.Automation.PSTypeName]'WinUtil.ForegroundWindowNative').Type) {
+        Add-Type -Namespace WinUtil -Name ForegroundWindowNative -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+'@ -ErrorAction Stop
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $Process.Refresh()
+        if ($Process.HasExited) { return }
+        if ($Process.MainWindowHandle -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 200
+    }
+
+    if ($Process.MainWindowHandle -eq [IntPtr]::Zero) { return }
+
+    if ([WinUtil.ForegroundWindowNative]::IsIconic($Process.MainWindowHandle)) {
+        [void][WinUtil.ForegroundWindowNative]::ShowWindow($Process.MainWindowHandle, 9)  # SW_RESTORE
+    }
+
+    [WinUtil.ForegroundWindowNative]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # VK_MENU (Alt) down
+    [void][WinUtil.ForegroundWindowNative]::SetForegroundWindow($Process.MainWindowHandle)
+    [WinUtil.ForegroundWindowNative]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up (KEYEVENTF_KEYUP)
+}
+
 function Set-WinUtilRegistry {
     <#
 
@@ -5537,7 +5588,8 @@ Function Uninstall-WinUtilProgramDirect {
 
             Write-WinUtilLog -Component "Package" -Message "Launching $name installer - it should detect the existing install and offer to uninstall. Stop $name first if it's running, then choose Uninstall in the window that opens. WinUtil will not wait for it to close."
             try {
-                Start-Process -FilePath $dest
+                $proc = Start-Process -FilePath $dest -PassThru
+                Set-WinUtilProcessForeground -Process $proc
             } catch {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to launch uninstaller for ${name}: $_"
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue
@@ -7871,14 +7923,14 @@ function Invoke-WPFUnInstall {
         $packagesNpm = $packagesSorted['Npm']
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
-        # declared uninstallCommand, plus github (arbitrary third-party installers with no
-        # known uninstaller) and the WSL feature/distro themselves (removing those is a
-        # system-wide, hard-to-reverse change well beyond "uninstall this one app" - not
-        # done implicitly).
+        # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
+        # github (arbitrary third-party installers with no known uninstaller) and the WSL
+        # feature/distro themselves (removing those is a system-wide, hard-to-reverse change
+        # well beyond "uninstall this one app" - not done implicitly).
         $unsupported = [System.Collections.Generic.List[string]]::new()
         $packagesDirect = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['Direct'])) {
-            if ($p -and -not [string]::IsNullOrWhiteSpace($p.uninstallCommand)) {
+            if ($p -and (-not [string]::IsNullOrWhiteSpace($p.uninstallCommand) -or $p.uninstallViaInstaller)) {
                 $packagesDirect.Add($p)
             } elseif ($p) {
                 $unsupported.Add($p.content)

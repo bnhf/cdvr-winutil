@@ -43,7 +43,8 @@ Function Uninstall-WinUtilProgramDirect {
 
             Write-WinUtilLog -Component "Package" -Message "Launching $name installer - it should detect the existing install and offer to uninstall. Stop $name first if it's running, then choose Uninstall in the window that opens. WinUtil will not wait for it to close."
             try {
-                Start-Process -FilePath $dest
+                $proc = Start-Process -FilePath $dest -PassThru
+                Set-WinUtilProcessForeground -Process $proc
             } catch {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to launch uninstaller for ${name}: $_"
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue

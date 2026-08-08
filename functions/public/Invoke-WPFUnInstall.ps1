@@ -45,14 +45,14 @@ function Invoke-WPFUnInstall {
         $packagesNpm = $packagesSorted['Npm']
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
-        # declared uninstallCommand, plus github (arbitrary third-party installers with no
-        # known uninstaller) and the WSL feature/distro themselves (removing those is a
-        # system-wide, hard-to-reverse change well beyond "uninstall this one app" - not
-        # done implicitly).
+        # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
+        # github (arbitrary third-party installers with no known uninstaller) and the WSL
+        # feature/distro themselves (removing those is a system-wide, hard-to-reverse change
+        # well beyond "uninstall this one app" - not done implicitly).
         $unsupported = [System.Collections.Generic.List[string]]::new()
         $packagesDirect = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['Direct'])) {
-            if ($p -and -not [string]::IsNullOrWhiteSpace($p.uninstallCommand)) {
+            if ($p -and (-not [string]::IsNullOrWhiteSpace($p.uninstallCommand) -or $p.uninstallViaInstaller)) {
                 $packagesDirect.Add($p)
             } elseif ($p) {
                 $unsupported.Add($p.content)
