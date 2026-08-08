@@ -12,6 +12,7 @@ BeforeAll {
 
     function Invoke-WPFUIThread { }
     function Write-WinUtilLog { }
+    function Start-WinUtilProcessAsStandardUser { param($FilePath, $ArgumentList) }
 }
 
 Describe "Get-WinUtilSelectedPackages" {
@@ -141,6 +142,48 @@ Describe "Install-WinUtilProgramWinget" {
 
         Should -Invoke -CommandName Start-Process -Times 0 -Exactly
     }
+
+    It "returns a success result per program when the elevated attempt succeeds" {
+        $result = Install-WinUtilProgramWinget -Action Install -Programs @("Git.Git")
+
+        $result | Should -HaveCount 1
+        $result[0].Program | Should -Be "Git.Git"
+        $result[0].Success | Should -BeTrue
+        $result[0].ExitCode | Should -Be 0
+    }
+
+    It "retries as standard user when winget reports a wrong-integrity-context error, and succeeds if that retry works" {
+        # Regression guard: uninstalling a per-user-scope package (e.g. Vivaldi) while WinUtil
+        # runs elevated fails with APPINSTALLER_CLI_ERROR_ADMIN_CONTEXT_ACTION_PROHIBITED
+        # (0x8A15007D / -1978335107) - that specific code should trigger exactly one de-elevated
+        # retry, not be treated as a hard failure.
+        Mock Start-Process { [pscustomobject]@{ ExitCode = -1978335107 } }
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
+
+        $result = Install-WinUtilProgramWinget -Action Uninstall -Programs @("Vivaldi.Vivaldi")
+
+        $result[0].Success | Should -BeTrue
+        $result[0].ExitCode | Should -Be 0
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "winget"
+        }
+    }
+
+    It "does not retry on a generic failure that isn't a wrong-context error" {
+        # Regression guard for the VLC case: APPINSTALLER_CLI_ERROR_EXEC_UNINSTALL_COMMAND_FAILED
+        # (0x8A150030 / -1978335184) means the uninstaller itself failed (e.g. it needed admin
+        # rights) - retrying de-elevated would make that worse, not better, so this must NOT
+        # trigger the standard-user retry and must be reported as a real failure.
+        Mock Start-Process { [pscustomobject]@{ ExitCode = -1978335184 } }
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
+
+        $result = Install-WinUtilProgramWinget -Action Uninstall -Programs @("VideoLAN.VLC")
+
+        $result[0].Success | Should -BeFalse
+        $result[0].ExitCode | Should -Be -1978335184
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 0 -Exactly
+    }
 }
 
 Describe "Install-WinUtilProgramChoco" {
@@ -225,5 +268,30 @@ Describe "Install-WinUtilProgramChoco" {
         Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
             $FilePath -eq "choco" -and $ArgumentList -eq "uninstall git -y"
         }
+    }
+
+    It "returns a per-program result reflecting the batch's actual exit code" {
+        function choco { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+        Mock choco {
+            $global:LASTEXITCODE = 0
+            @("git|2.43.0")
+        }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } } -ParameterFilter { $ArgumentList -eq "upgrade git -y" }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $ArgumentList -eq "install vlc -y" }
+
+        $result = Install-WinUtilProgramChoco -Action Install -Programs @("git", "vlc")
+
+        (@($result) | Where-Object { $_.Program -eq "git" }).Success | Should -BeFalse
+        (@($result) | Where-Object { $_.Program -eq "vlc" }).Success | Should -BeTrue
+    }
+
+    It "returns a failure result on uninstall when choco reports a non-zero exit code" {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } }
+
+        $result = Install-WinUtilProgramChoco -Action Uninstall -Programs @("git")
+
+        $result[0].Program | Should -Be "git"
+        $result[0].Success | Should -BeFalse
+        $result[0].ExitCode | Should -Be 1
     }
 }

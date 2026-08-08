@@ -11,6 +11,13 @@ function Install-WinUtilProgramChoco {
         that per-package-call pattern is exactly what caused the earlier DISM-based slowdown
         elsewhere in this app) and already-installed IDs are routed through "choco upgrade"
         instead, so this behaves like winget's install-or-upgrade semantics.
+
+    .OUTPUTS
+        One [pscustomobject] per requested program, each with .Program, .Success, and
+        .ExitCode - so callers can report real per-item outcomes instead of assuming every
+        attempt succeeded. Choco runs one batched command per install/upgrade/uninstall group
+        rather than one call per package, so every program in the same batch shares that
+        batch's exit code/outcome - the same granularity choco itself gives us.
     #>
     param (
         [Parameter(Mandatory=$true)]
@@ -21,16 +28,22 @@ function Install-WinUtilProgramChoco {
         [string[]]$Programs
     )
 
+    $results = [System.Collections.Generic.List[object]]::new()
+
     if ($Action -eq 'Uninstall') {
         $arguments = "uninstall $Programs -y"
         Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s): $($Programs -join ', ')"
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -eq 0) {
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s) completed: $($Programs -join ', ')"
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Uninstall choco package(s) FAILED: $($Programs -join ', ') (exit code: $($process.ExitCode))"
         }
-        return
+        foreach ($program in $Programs) {
+            $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
+        }
+        return ,$results.ToArray()
     }
 
     $installedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -58,10 +71,14 @@ function Install-WinUtilProgramChoco {
         $arguments = "install $toInstall -y"
         Write-WinUtilLog -Component "Package" -Message "Install choco package(s): $($toInstall -join ', ')"
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -eq 0) {
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "Install choco package(s) completed: $($toInstall -join ', ')"
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Install choco package(s) FAILED: $($toInstall -join ', ') (exit code: $($process.ExitCode))"
+        }
+        foreach ($program in $toInstall) {
+            $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
         }
     }
 
@@ -69,10 +86,16 @@ function Install-WinUtilProgramChoco {
         $arguments = "upgrade $toUpgrade -y"
         Write-WinUtilLog -Component "Package" -Message "Upgrade already-installed choco package(s): $($toUpgrade -join ', ')"
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -eq 0) {
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "Upgrade choco package(s) completed: $($toUpgrade -join ', ')"
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Upgrade choco package(s) FAILED: $($toUpgrade -join ', ') (exit code: $($process.ExitCode))"
         }
+        foreach ($program in $toUpgrade) {
+            $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
+        }
     }
+
+    return ,$results.ToArray()
 }

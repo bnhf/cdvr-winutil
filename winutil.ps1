@@ -1454,6 +1454,13 @@ function Install-WinUtilProgramChoco {
         that per-package-call pattern is exactly what caused the earlier DISM-based slowdown
         elsewhere in this app) and already-installed IDs are routed through "choco upgrade"
         instead, so this behaves like winget's install-or-upgrade semantics.
+
+    .OUTPUTS
+        One [pscustomobject] per requested program, each with .Program, .Success, and
+        .ExitCode - so callers can report real per-item outcomes instead of assuming every
+        attempt succeeded. Choco runs one batched command per install/upgrade/uninstall group
+        rather than one call per package, so every program in the same batch shares that
+        batch's exit code/outcome - the same granularity choco itself gives us.
     #>
     param (
         [Parameter(Mandatory=$true)]
@@ -1464,16 +1471,22 @@ function Install-WinUtilProgramChoco {
         [string[]]$Programs
     )
 
+    $results = [System.Collections.Generic.List[object]]::new()
+
     if ($Action -eq 'Uninstall') {
         $arguments = "uninstall $Programs -y"
         Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s): $($Programs -join ', ')"
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -eq 0) {
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s) completed: $($Programs -join ', ')"
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Uninstall choco package(s) FAILED: $($Programs -join ', ') (exit code: $($process.ExitCode))"
         }
-        return
+        foreach ($program in $Programs) {
+            $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
+        }
+        return ,$results.ToArray()
     }
 
     $installedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1501,10 +1514,14 @@ function Install-WinUtilProgramChoco {
         $arguments = "install $toInstall -y"
         Write-WinUtilLog -Component "Package" -Message "Install choco package(s): $($toInstall -join ', ')"
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -eq 0) {
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "Install choco package(s) completed: $($toInstall -join ', ')"
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Install choco package(s) FAILED: $($toInstall -join ', ') (exit code: $($process.ExitCode))"
+        }
+        foreach ($program in $toInstall) {
+            $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
         }
     }
 
@@ -1512,12 +1529,18 @@ function Install-WinUtilProgramChoco {
         $arguments = "upgrade $toUpgrade -y"
         Write-WinUtilLog -Component "Package" -Message "Upgrade already-installed choco package(s): $($toUpgrade -join ', ')"
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -eq 0) {
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "Upgrade choco package(s) completed: $($toUpgrade -join ', ')"
         } else {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Upgrade choco package(s) FAILED: $($toUpgrade -join ', ') (exit code: $($process.ExitCode))"
         }
+        foreach ($program in $toUpgrade) {
+            $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
+        }
     }
+
+    return ,$results.ToArray()
 }
 
 Function Install-WinUtilProgramDirect {
@@ -1711,6 +1734,25 @@ Function Install-WinUtilProgramNpm {
 }
 
 Function Install-WinUtilProgramWinget {
+    <#
+    .SYNOPSIS
+        Installs or uninstalls the given winget package IDs.
+
+    .DESCRIPTION
+        Runs winget natively in WinUtil's own (elevated) process first - correct for
+        machine-scope packages (e.g. VLC, whose own uninstaller needs admin rights to touch
+        Program Files/HKLM). Only retries de-elevated, via Start-WinUtilProcessAsStandardUser,
+        when winget's exit code specifically indicates the operation was blocked purely because
+        of the wrong integrity context - not on every failure. Blindly de-elevating every winget
+        call (an earlier version of this function did that) fixed per-user-scope packages like
+        Vivaldi but broke machine-scope ones like VLC, whose bundled uninstaller then failed
+        for lack of admin rights - trading one scope-mismatch bug for the opposite one.
+
+    .OUTPUTS
+        One [pscustomobject] per attempted program (blank/na entries are skipped, not
+        included), each with .Program, .Success, and .ExitCode - so callers can report real
+        per-item outcomes instead of assuming every attempt succeeded.
+    #>
     param (
         [Parameter(Mandatory=$true)]
         [ValidateSet("Install", "Uninstall")]
@@ -1719,6 +1761,16 @@ Function Install-WinUtilProgramWinget {
         [Parameter(Mandatory=$true)]
         [string[]]$Programs
     )
+
+    # winget exit codes that mean "blocked purely by running in the wrong integrity context",
+    # not a real install/uninstall failure - safe to retry once in the other context:
+    #   0x8A15007D APPINSTALLER_CLI_ERROR_ADMIN_CONTEXT_ACTION_PROHIBITED (-1978335107) - a
+    #     per-user-scope package refused because WinUtil is running elevated (the Vivaldi case).
+    #   0x8A150056 APPINSTALLER_CLI_ERROR_INSTALLER_PROHIBITS_ELEVATION (-1978335146) - the
+    #     installer itself refuses to run elevated.
+    $wrongContextExitCodes = @(-1978335107, -1978335146)
+
+    $results = [System.Collections.Generic.List[object]]::new()
 
     foreach ($program in $Programs) {
         if ([string]::IsNullOrWhiteSpace($program) -or $program -eq "na") {
@@ -1738,22 +1790,30 @@ Function Install-WinUtilProgramWinget {
         }
 
         Write-WinUtilLog -Component "Package" -Message "$Action winget package: $program (source: $source)"
-        # Run winget as the standard (non-elevated) user, not as WinUtil's own elevated
-        # process - winget refuses to manage per-user-scope packages while elevated
-        # ("The package installed for user scope cannot be uninstalled when running with
-        # administrator privileges."), and most winget packages install in user scope.
-        $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
-        if ($process.ExitCode -eq 0) {
+
+        $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+
+        if ($wrongContextExitCodes -contains $process.ExitCode) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$Action winget package: $program failed running elevated (exit code: $($process.ExitCode)) - retrying as standard user."
+            $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
+        }
+
+        $success = $process.ExitCode -eq 0
+        if ($success) {
             Write-WinUtilLog -Component "Package" -Message "$Action winget package completed: $program"
         } else {
             $hint = if ($Action -eq 'Uninstall') {
-                " This commonly happens when winget can't manage a package that was installed in per-user scope while WinUtil is running elevated - if so, uninstall it via Windows Settings > Apps instead."
+                " If this keeps happening, try uninstalling it via Windows Settings > Apps instead."
             } else {
                 ""
             }
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$Action winget package FAILED: $program (exit code: $($process.ExitCode)).$hint"
         }
+
+        $results.Add([pscustomobject]@{ Program = $program; Success = $success; ExitCode = $process.ExitCode })
     }
+
+    return ,$results.ToArray()
 }
 
 Function Install-WinUtilStreamLinkManager {
@@ -7454,6 +7514,15 @@ function Invoke-WPFInstall {
         $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
+
+        # winget/choco IDs actually installed/uninstalled don't carry the friendly display name -
+        # this maps back to it (falling back to the raw ID) for the failure summary below.
+        $packageNameById = @{}
+        foreach ($p in $PackagesToInstall) {
+            if ($p.winget -and $p.winget -ne "na") { $packageNameById[$p.winget -replace '^msstore:', ''] = $p.content }
+            if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
+        }
+        $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
         try {
@@ -7502,7 +7571,12 @@ function Invoke-WPFInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $program ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    Install-WinUtilProgramWinget -Action Install -Programs @($program)
+                    $installResults = Install-WinUtilProgramWinget -Action Install -Programs @($program)
+                    foreach ($r in $installResults) {
+                        if (-not $r.Success) {
+                            $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                        }
+                    }
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                     if ($hasUI) {
@@ -7519,7 +7593,12 @@ function Invoke-WPFInstall {
                 }
 
                 Install-WinUtilChoco
-                Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+                foreach ($r in $installResults) {
+                    if (-not $r.Success) {
+                        $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                    }
+                }
                 $completedPackages += @($packagesChoco).Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
@@ -7556,10 +7635,22 @@ function Invoke-WPFInstall {
             Write-Host "==========================================="
             Write-Host "--      Installs have finished          ---"
             Write-Host "==========================================="
-            Write-WinUtilLog -Component "Install" -Message "Install workflow completed."
-            if ($hasUI) {
-                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App install finished" -Percent 100
-                Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+            if ($failedPackages.Count -gt 0) {
+                $failedList = $failedPackages -join "`n - "
+                Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Install workflow completed with failures: $($failedPackages -join ', ')"
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App install finished with errors" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock {
+                        Set-WinUtilTaskbaritem -state "None" -overlay "warning"
+                        Show-WinUtilMessage -Message "These failed to install - check the log for details:`n - $failedList" -Title "Some installs failed" -Button "OK" -Icon "Warning"
+                    }
+                }
+            } else {
+                Write-WinUtilLog -Component "Install" -Message "Install workflow completed."
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App install finished" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+                }
             }
         } catch {
             Write-Host "==========================================="
@@ -8732,6 +8823,15 @@ function Invoke-WPFUnInstall {
         $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
+
+        # winget/choco IDs actually uninstalled don't carry the friendly display name - this maps
+        # back to it (falling back to the raw ID) for the failure summary below.
+        $packageNameById = @{}
+        foreach ($p in $PackagesToUninstall) {
+            if ($p.winget -and $p.winget -ne "na") { $packageNameById[$p.winget -replace '^msstore:', ''] = $p.content }
+            if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
+        }
+        $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), unsupported=$($unsupported.Count)"
 
         try {
@@ -8758,7 +8858,12 @@ function Invoke-WPFUnInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $program ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    Install-WinUtilProgramWinget -Action Uninstall -Programs @($program)
+                    $uninstallResults = Install-WinUtilProgramWinget -Action Uninstall -Programs @($program)
+                    foreach ($r in $uninstallResults) {
+                        if (-not $r.Success) {
+                            $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                        }
+                    }
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                     if ($hasUI) {
@@ -8774,7 +8879,12 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco
+                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco
+                foreach ($r in $uninstallResults) {
+                    if (-not $r.Success) {
+                        $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                    }
+                }
                 $completedPackages += @($packagesChoco).Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
@@ -8857,10 +8967,22 @@ function Invoke-WPFUnInstall {
             Write-Host "==========================================="
             Write-Host "--       Uninstalls have finished       ---"
             Write-Host "==========================================="
-            Write-WinUtilLog -Component "Uninstall" -Message "Uninstall workflow completed."
-            if ($hasUI) {
-                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App uninstall finished" -Percent 100
-                Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+            if ($failedPackages.Count -gt 0) {
+                $failedList = $failedPackages -join "`n - "
+                Write-WinUtilLog -Level "WARN" -Component "Uninstall" -Message "Uninstall workflow completed with failures: $($failedPackages -join ', ')"
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App uninstall finished with errors" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock {
+                        Set-WinUtilTaskbaritem -state "None" -overlay "warning"
+                        Show-WinUtilMessage -Message "These failed to uninstall - check the log for details:`n - $failedList" -Title "Some uninstalls failed" -Button "OK" -Icon "Warning"
+                    }
+                }
+            } else {
+                Write-WinUtilLog -Component "Uninstall" -Message "Uninstall workflow completed."
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App uninstall finished" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+                }
             }
         } catch {
             Write-Host "==========================================="

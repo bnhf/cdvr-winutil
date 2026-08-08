@@ -66,6 +66,7 @@ BeforeAll {
 
         [pscustomobject]@{
             Name = $Name
+            content = $Name
             Description = "$Name package"
             winget = $Winget
             choco = $Choco
@@ -329,6 +330,39 @@ Describe "Invoke-WPFInstall runspace body" {
         }
         $script:sync.ProcessRunning | Should -BeFalse
     }
+
+    It "shows a failure summary and warning overlay - not a checkmark - when a package fails without throwing" {
+        # Regression guard: this is the actual bug report - Install-WinUtilProgramWinget/Choco
+        # returning a per-item failure (not a thrown exception) must not be reported as a clean
+        # success. Invoke-WPFUIThread is mocked as a no-op here (matching the rest of this
+        # file's pattern), so the scriptblock's own source text is what's asserted on rather
+        # than its executed effects.
+        Mock Install-WinUtilProgramWinget { @([pscustomobject]@{ Program = "Git.Git"; Success = $false; ExitCode = 1 }) }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "App install finished with errors" -and $Percent -eq 100
+        }
+        Should -Invoke -CommandName Invoke-WPFUIThread -Times 1 -Exactly -ParameterFilter {
+            # The scriptblock's source text references $failedList by name, not its interpolated
+            # value (ToString() on a scriptblock returns its literal source, not a rendered
+            # string) - so this checks for the static parts, not the package name itself.
+            $ScriptBlock.ToString() -like '*Set-WinUtilTaskbaritem -state "None" -overlay "warning"*' -and
+                $ScriptBlock.ToString() -like '*Some installs failed*' -and
+                $ScriptBlock.ToString() -like '*$failedList*'
+        }
+        Should -Invoke -CommandName Invoke-WPFUIThread -Times 0 -Exactly -ParameterFilter {
+            $ScriptBlock.ToString() -like '*overlay "checkmark"*'
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            # Confirms the friendly display name ("Git", from the package's .content field) was
+            # resolved from the raw winget ID ("Git.Git") for the failure report.
+            $Level -eq "WARN" -and $Component -eq "Install" -and $Message -like "Install workflow completed with failures: Git*"
+        }
+        $script:sync.ProcessRunning | Should -BeFalse
+    }
 }
 
 Describe "Invoke-WPFUnInstall entrypoint" {
@@ -500,6 +534,39 @@ Describe "Invoke-WPFUnInstall runspace body" {
         }
         Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
             $Level -eq "ERROR" -and $Component -eq "Uninstall" -and $Message -like "Uninstall workflow failed:*"
+        }
+        $script:sync.ProcessRunning | Should -BeFalse
+    }
+
+    It "shows a failure summary and warning overlay - not a checkmark - when a package fails without throwing" {
+        # Regression guard for the actual reported bug: uninstalling VLC failed (winget's own
+        # exit code was non-zero) but the progress bar still showed a completed/checkmark state,
+        # because the failure was only logged, never surfaced. Install-WinUtilProgramWinget
+        # returning a per-item failure (not a thrown exception) must produce a warning overlay
+        # and a summary dialog, not a clean "finished" checkmark.
+        Mock Install-WinUtilProgramWinget { @([pscustomobject]@{ Program = "Git.Git"; Success = $false; ExitCode = -1978335184 }) }
+
+        Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
+        & $script:capturedUninstallScriptBlock -PackagesToUninstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "App uninstall finished with errors" -and $Percent -eq 100
+        }
+        Should -Invoke -CommandName Invoke-WPFUIThread -Times 1 -Exactly -ParameterFilter {
+            # The scriptblock's source text references $failedList by name, not its interpolated
+            # value (ToString() on a scriptblock returns its literal source, not a rendered
+            # string) - so this checks for the static parts, not the package name itself.
+            $ScriptBlock.ToString() -like '*Set-WinUtilTaskbaritem -state "None" -overlay "warning"*' -and
+                $ScriptBlock.ToString() -like '*Some uninstalls failed*' -and
+                $ScriptBlock.ToString() -like '*$failedList*'
+        }
+        Should -Invoke -CommandName Invoke-WPFUIThread -Times 0 -Exactly -ParameterFilter {
+            $ScriptBlock.ToString() -like '*overlay "checkmark"*'
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            # Confirms the friendly display name ("Git", from the package's .content field) was
+            # resolved from the raw winget ID ("Git.Git") for the failure report.
+            $Level -eq "WARN" -and $Component -eq "Uninstall" -and $Message -like "Uninstall workflow completed with failures: Git*"
         }
         $script:sync.ProcessRunning | Should -BeFalse
     }

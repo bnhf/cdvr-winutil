@@ -65,6 +65,15 @@ function Invoke-WPFInstall {
         $totalPackages = @($packagesWinget).Count + @($packagesChoco).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesNpm).Count + @($packagesWslFeature).Count + @($packagesWslDistro).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
+
+        # winget/choco IDs actually installed/uninstalled don't carry the friendly display name -
+        # this maps back to it (falling back to the raw ID) for the failure summary below.
+        $packageNameById = @{}
+        foreach ($p in $PackagesToInstall) {
+            if ($p.winget -and $p.winget -ne "na") { $packageNameById[$p.winget -replace '^msstore:', ''] = $p.content }
+            if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
+        }
+        $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
         try {
@@ -113,7 +122,12 @@ function Invoke-WPFInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $program ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    Install-WinUtilProgramWinget -Action Install -Programs @($program)
+                    $installResults = Install-WinUtilProgramWinget -Action Install -Programs @($program)
+                    foreach ($r in $installResults) {
+                        if (-not $r.Success) {
+                            $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                        }
+                    }
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                     if ($hasUI) {
@@ -130,7 +144,12 @@ function Invoke-WPFInstall {
                 }
 
                 Install-WinUtilChoco
-                Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+                foreach ($r in $installResults) {
+                    if (-not $r.Success) {
+                        $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                    }
+                }
                 $completedPackages += @($packagesChoco).Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
@@ -167,10 +186,22 @@ function Invoke-WPFInstall {
             Write-Host "==========================================="
             Write-Host "--      Installs have finished          ---"
             Write-Host "==========================================="
-            Write-WinUtilLog -Component "Install" -Message "Install workflow completed."
-            if ($hasUI) {
-                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App install finished" -Percent 100
-                Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+            if ($failedPackages.Count -gt 0) {
+                $failedList = $failedPackages -join "`n - "
+                Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Install workflow completed with failures: $($failedPackages -join ', ')"
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App install finished with errors" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock {
+                        Set-WinUtilTaskbaritem -state "None" -overlay "warning"
+                        Show-WinUtilMessage -Message "These failed to install - check the log for details:`n - $failedList" -Title "Some installs failed" -Button "OK" -Icon "Warning"
+                    }
+                }
+            } else {
+                Write-WinUtilLog -Component "Install" -Message "Install workflow completed."
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App install finished" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+                }
             }
         } catch {
             Write-Host "==========================================="

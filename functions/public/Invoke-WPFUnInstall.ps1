@@ -74,6 +74,15 @@ function Invoke-WPFUnInstall {
         $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
+
+        # winget/choco IDs actually uninstalled don't carry the friendly display name - this maps
+        # back to it (falling back to the raw ID) for the failure summary below.
+        $packageNameById = @{}
+        foreach ($p in $PackagesToUninstall) {
+            if ($p.winget -and $p.winget -ne "na") { $packageNameById[$p.winget -replace '^msstore:', ''] = $p.content }
+            if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
+        }
+        $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), unsupported=$($unsupported.Count)"
 
         try {
@@ -100,7 +109,12 @@ function Invoke-WPFUnInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $program ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    Install-WinUtilProgramWinget -Action Uninstall -Programs @($program)
+                    $uninstallResults = Install-WinUtilProgramWinget -Action Uninstall -Programs @($program)
+                    foreach ($r in $uninstallResults) {
+                        if (-not $r.Success) {
+                            $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                        }
+                    }
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                     if ($hasUI) {
@@ -116,7 +130,12 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco
+                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco
+                foreach ($r in $uninstallResults) {
+                    if (-not $r.Success) {
+                        $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
+                    }
+                }
                 $completedPackages += @($packagesChoco).Count
                 $completedPercent = [int](($completedPackages / $totalPackages) * 100)
                 if ($hasUI) {
@@ -199,10 +218,22 @@ function Invoke-WPFUnInstall {
             Write-Host "==========================================="
             Write-Host "--       Uninstalls have finished       ---"
             Write-Host "==========================================="
-            Write-WinUtilLog -Component "Uninstall" -Message "Uninstall workflow completed."
-            if ($hasUI) {
-                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App uninstall finished" -Percent 100
-                Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+            if ($failedPackages.Count -gt 0) {
+                $failedList = $failedPackages -join "`n - "
+                Write-WinUtilLog -Level "WARN" -Component "Uninstall" -Message "Uninstall workflow completed with failures: $($failedPackages -join ', ')"
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App uninstall finished with errors" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock {
+                        Set-WinUtilTaskbaritem -state "None" -overlay "warning"
+                        Show-WinUtilMessage -Message "These failed to uninstall - check the log for details:`n - $failedList" -Title "Some uninstalls failed" -Button "OK" -Icon "Warning"
+                    }
+                }
+            } else {
+                Write-WinUtilLog -Component "Uninstall" -Message "Uninstall workflow completed."
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "App uninstall finished" -Percent 100
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+                }
             }
         } catch {
             Write-Host "==========================================="
