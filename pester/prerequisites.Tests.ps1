@@ -8,6 +8,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilVirtualizationFirmwareEnabled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilProgramInstalled.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPrerequisites.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPackagePrompts.ps1")
 
     function Test-WinUtilWSLDistroInstalled { param($Distro) $false }
     function Show-WinUtilMessage { param($Message, $Title, $Button, $Icon) }
@@ -92,6 +93,25 @@ Describe "Resolve-WinUtilPrerequisites virtualization gate" {
 
         $resolved | Should -BeNullOrEmpty
         Should -Invoke -CommandName Show-WinUtilMessage -Times 1 -Exactly -ParameterFilter { $Button -eq ([System.Windows.MessageBoxButton]::OK) }
+    }
+
+    It "returns an empty array rather than `$null` when everything is dropped, matching a real production crash report" {
+        # PowerShell unwraps a returned empty array to $null across a function-return boundary
+        # unless guarded - this reproduces the exact reported failure: a solo Docker Desktop
+        # selection whose only prerequisite (WSL2) is declined/blocked, leaving nothing queued.
+        Mock Test-WinUtilVirtualizationFirmwareEnabled { $false }
+        Mock Show-WinUtilMessage { [System.Windows.MessageBoxResult]::OK }
+
+        $docker = [pscustomobject]@{ Key = "dockerdesktop"; content = "Docker Desktop"; winget = "Docker.DockerDesktop"; requires = @("wsl2") }
+        $resolved = Resolve-WinUtilPrerequisites -PackagesToInstall @($docker)
+
+        ($null -eq $resolved) | Should -BeFalse
+        $resolved.Count | Should -Be 0
+
+        # Invoke-WPFInstall.ps1 immediately feeds this into Resolve-WinUtilPackagePrompts, which
+        # requires a non-null [object[]] - this used to throw
+        # ParameterArgumentValidationErrorNullNotAllowed here.
+        { Resolve-WinUtilPackagePrompts -PackagesToInstall $resolved } | Should -Not -Throw
     }
 
     It "does not gate on virtualization when nothing in the selection needs WSL2" {

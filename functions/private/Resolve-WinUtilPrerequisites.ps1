@@ -10,6 +10,7 @@ function Resolve-WinUtilPrerequisites {
     #>
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$PackagesToInstall
     )
 
@@ -86,5 +87,10 @@ function Resolve-WinUtilPrerequisites {
 
     foreach ($d in $toDrop) { [void]$result.Remove($d) }
 
-    return $result.ToArray()
+    # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
+    # function-return boundary, and $null then fails to bind to Resolve-WinUtilPackagePrompts's
+    # mandatory [object[]] parameter (e.g. every selected package had a declined/blocked
+    # prerequisite) - a ParameterArgumentValidationErrorNullNotAllowed exception instead of the
+    # intended "nothing left to install" no-op.
+    return ,$result.ToArray()
 }

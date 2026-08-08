@@ -11,6 +11,7 @@ function Resolve-WinUtilPackagePrompts {
     #>
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$PackagesToInstall
     )
 
@@ -33,5 +34,8 @@ function Resolve-WinUtilPackagePrompts {
         $result.Add($packageWithValues)
     }
 
-    return $result.ToArray()
+    # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
+    # function-return boundary (e.g. if every remaining package's prompt gets cancelled) - see
+    # Resolve-WinUtilPrerequisites.ps1 for the exception that caused downstream.
+    return ,$result.ToArray()
 }

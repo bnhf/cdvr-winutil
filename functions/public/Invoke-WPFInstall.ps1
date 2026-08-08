@@ -27,10 +27,19 @@ function Invoke-WPFInstall {
     # Prerequisite checks and value prompts show modal dialogs, so they must run here on the
     # UI thread - before the selection is handed off to the background install runspace.
     $PackagesToInstall = Resolve-WinUtilPrerequisites -PackagesToInstall $PackagesToInstall
+
+    # Everything can legitimately end up dropped here (e.g. a declined or blocked prerequisite),
+    # so check before the next step rather than after - Resolve-WinUtilPackagePrompts still
+    # requires a non-empty array by design, since it isn't meant to be called with nothing to do.
+    if ($PackagesToInstall.Count -eq 0) {
+        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prerequisite resolution."
+        return
+    }
+
     $PackagesToInstall = Resolve-WinUtilPackagePrompts -PackagesToInstall $PackagesToInstall
 
     if ($PackagesToInstall.Count -eq 0) {
-        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prerequisite/prompt resolution."
+        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prompt resolution."
         return
     }
 
@@ -66,6 +75,32 @@ function Invoke-WPFInstall {
                     if ($null -ne $sync.ItemsControl) {
                         $sync.ItemsControl.IsEnabled = $false
                     }
+                }
+            }
+
+            # WSL2/Debian go first, ahead of winget/choco - Docker Desktop (winget) requires
+            # WSL2, and previously ran before it was even enabled, since winget/choco installed
+            # unconditionally first and the WSL feature/distro buckets only ran afterward as
+            # part of the general bucket loop below.
+            foreach ($installBucket in @(
+                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
+                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } }
+            )) {
+                if (@($installBucket.Packages).Count -eq 0) { continue }
+
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                & $installBucket.Installer $installBucket.Packages
+
+                $completedPackages += @($installBucket.Packages).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
 
@@ -105,8 +140,6 @@ function Invoke-WPFInstall {
             }
 
             foreach ($installBucket in @(
-                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
-                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } },
                 @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
                 @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
                 @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },

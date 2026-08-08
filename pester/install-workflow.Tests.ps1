@@ -6,12 +6,27 @@ BeforeAll {
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPackageLogSummary.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPrerequisites.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPackagePrompts.ps1")
     . (Join-Path $script:repoRoot "functions\public\Invoke-WPFInstall.ps1")
     . (Join-Path $script:repoRoot "functions\public\Invoke-WPFUnInstall.ps1")
 
     function Show-WinUtilMessage {
         param($Message, $Title, $Button, $Icon)
     }
+    function Show-WinUtilPromptDialog {
+        param($Title, $Message, $Prompts)
+    }
+    function Test-WinUtilProgramInstalled {
+        param($WingetId, $ChocoId)
+        $false
+    }
+    function Test-WinUtilWSLFeatureEnabled { $false }
+    function Test-WinUtilWSLDistroInstalled {
+        param($Distro)
+        $false
+    }
+    function Test-WinUtilVirtualizationFirmwareEnabled { $true }
     function Invoke-WPFRunspace {
         param($ArgumentList, $ParameterList, [scriptblock]$ScriptBlock)
     }
@@ -28,6 +43,12 @@ BeforeAll {
     }
     function Install-WinUtilProgramChoco {
         param($Action, $Programs)
+    }
+    function Install-WinUtilFeatureWSL {
+        param($Packages)
+    }
+    function Install-WinUtilWSLDistro {
+        param($Packages)
     }
     function Invoke-WPFUIThread {
         param([scriptblock]$ScriptBlock)
@@ -87,9 +108,14 @@ BeforeAll {
             [string[]]$Choco = @()
         )
 
+        # Real Get-WinUtilSelectedPackages always returns all 9 buckets as actual (possibly
+        # empty) collections, never a missing key - @() on a truly missing/$null key wraps it
+        # as a one-element array (Count 1, not 0), so leaving buckets out here would make the
+        # runspace body think there's WSL/direct/etc work to do when there isn't any.
         $packages = @{}
-        $packages["Winget"] = [System.Collections.Generic.List[string]]::new()
-        $packages["Choco"] = [System.Collections.Generic.List[string]]::new()
+        foreach ($bucketName in @("Winget", "Choco", "Direct", "Github", "Npm", "WslFeature", "WslDistro", "WslCommand", "StreamLinkManager")) {
+            $packages[$bucketName] = [System.Collections.Generic.List[string]]::new()
+        }
 
         foreach ($package in $Winget) {
             $null = $packages["Winget"].Add($package)
@@ -257,6 +283,26 @@ Describe "Invoke-WPFInstall runspace body" {
             $ScriptBlock.ToString() -like '*Set-WinUtilTaskbaritem -state "None" -overlay "checkmark"*'
         }
         $script:sync.ProcessRunning | Should -BeFalse
+    }
+
+    It "installs WSL2/Debian before winget/choco, so Docker Desktop doesn't try to install before its own WSL2 prerequisite is even enabled" {
+        Mock Get-WinUtilSelectedPackages {
+            $split = New-WinUtilPackageSplit -Winget @("Docker.DockerDesktop") -Choco @()
+            $split["WslFeature"].Add("wsl2")
+            $split["WslDistro"].Add("debian")
+            $split
+        }
+        $script:callOrder = [System.Collections.Generic.List[string]]::new()
+        Mock Install-WinUtilFeatureWSL { $script:callOrder.Add("wslFeature") }
+        Mock Install-WinUtilWSLDistro { $script:callOrder.Add("wslDistro") }
+        Mock Install-WinUtilProgramWinget { $script:callOrder.Add("winget") }
+        Mock Install-WinUtilProgramChoco { $script:callOrder.Add("choco") }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($script:package) -ManagerPreference "Winget"
+
+        $script:callOrder | Should -Be @("wslFeature", "wslDistro", "winget")
+        Remove-Variable -Name callOrder -Scope Script -ErrorAction SilentlyContinue
     }
 
     It "shows failure progress, sets taskbar error state, and clears ProcessRunning on failure" {

@@ -4557,6 +4557,7 @@ function Resolve-WinUtilPackagePrompts {
     #>
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$PackagesToInstall
     )
 
@@ -4579,7 +4580,10 @@ function Resolve-WinUtilPackagePrompts {
         $result.Add($packageWithValues)
     }
 
-    return $result.ToArray()
+    # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
+    # function-return boundary (e.g. if every remaining package's prompt gets cancelled) - see
+    # Resolve-WinUtilPrerequisites.ps1 for the exception that caused downstream.
+    return ,$result.ToArray()
 }
 
 function Resolve-WinUtilPrerequisites {
@@ -4594,6 +4598,7 @@ function Resolve-WinUtilPrerequisites {
     #>
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$PackagesToInstall
     )
 
@@ -4670,7 +4675,12 @@ function Resolve-WinUtilPrerequisites {
 
     foreach ($d in $toDrop) { [void]$result.Remove($d) }
 
-    return $result.ToArray()
+    # The leading comma matters: PowerShell unwraps a returned empty array to $null across the
+    # function-return boundary, and $null then fails to bind to Resolve-WinUtilPackagePrompts's
+    # mandatory [object[]] parameter (e.g. every selected package had a declined/blocked
+    # prerequisite) - a ParameterArgumentValidationErrorNullNotAllowed exception instead of the
+    # intended "nothing left to install" no-op.
+    return ,$result.ToArray()
 }
 
 function Save-WinUtilFile {
@@ -7200,10 +7210,19 @@ function Invoke-WPFInstall {
     # Prerequisite checks and value prompts show modal dialogs, so they must run here on the
     # UI thread - before the selection is handed off to the background install runspace.
     $PackagesToInstall = Resolve-WinUtilPrerequisites -PackagesToInstall $PackagesToInstall
+
+    # Everything can legitimately end up dropped here (e.g. a declined or blocked prerequisite),
+    # so check before the next step rather than after - Resolve-WinUtilPackagePrompts still
+    # requires a non-empty array by design, since it isn't meant to be called with nothing to do.
+    if ($PackagesToInstall.Count -eq 0) {
+        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prerequisite resolution."
+        return
+    }
+
     $PackagesToInstall = Resolve-WinUtilPackagePrompts -PackagesToInstall $PackagesToInstall
 
     if ($PackagesToInstall.Count -eq 0) {
-        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prerequisite/prompt resolution."
+        Write-WinUtilLog -Component "Install" -Message "Nothing left to install after prompt resolution."
         return
     }
 
@@ -7239,6 +7258,32 @@ function Invoke-WPFInstall {
                     if ($null -ne $sync.ItemsControl) {
                         $sync.ItemsControl.IsEnabled = $false
                     }
+                }
+            }
+
+            # WSL2/Debian go first, ahead of winget/choco - Docker Desktop (winget) requires
+            # WSL2, and previously ran before it was even enabled, since winget/choco installed
+            # unconditionally first and the WSL feature/distro buckets only ran afterward as
+            # part of the general bucket loop below.
+            foreach ($installBucket in @(
+                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
+                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } }
+            )) {
+                if (@($installBucket.Packages).Count -eq 0) { continue }
+
+                $position = $completedPackages + 1
+                $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
+                }
+
+                & $installBucket.Installer $installBucket.Packages
+
+                $completedPackages += @($installBucket.Packages).Count
+                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                if ($hasUI) {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
+                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
 
@@ -7278,8 +7323,6 @@ function Invoke-WPFInstall {
             }
 
             foreach ($installBucket in @(
-                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
-                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } },
                 @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
                 @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
                 @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },
@@ -8929,7 +8972,8 @@ $sync.configs.applications = @'
     "handle": "Docker, Inc.",
     "winget": "Docker.DockerDesktop",
     "requires": [
-      "wsl2"
+      "wsl2",
+      "debian"
     ],
     "foss": false
   },
