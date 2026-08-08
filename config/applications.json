@@ -1,4 +1,25 @@
 {
+    "chocolatey": {
+        "category": "Foundational",
+        "content": "Chocolatey",
+        "description": "Command-line package manager for Windows, built on NuGet - installing this lets WinUtil install other apps via choco when that's your preferred package manager.",
+        "link": "https://chocolatey.org",
+        "icon": "https://raw.githubusercontent.com/chocolatey/choco/master/docs/logo/chocolateyicon.png",
+        "handle": "Chocolatey Software, Inc.",
+        "winget": "Chocolatey.Chocolatey",
+        "foss": true
+    },
+    "unigetui": {
+        "category": "Foundational",
+        "choco": "wingetui",
+        "content": "UniGetUI",
+        "description": "Graphical interface for managing packages across WinGet, Chocolatey, Scoop, and other package managers from one screen. Formerly WingetUI.",
+        "link": "https://devolutions.net/unigetui/",
+        "icon": "https://raw.githubusercontent.com/Devolutions/UniGetUI/main/media/icon.png",
+        "handle": "Devolutions",
+        "winget": "Devolutions.UniGetUI",
+        "foss": true
+    },
     "windowsterminal": {
         "category": "Foundational",
         "choco": "microsoft-windows-terminal",
@@ -117,7 +138,7 @@
         "link": "https://getchannels.com/dvr-server/",
         "icon": "https://getchannels.com/favicon.ico",
         "webui": "http://localhost:8089",
-        "handle": "@Bobby_Vaughn",
+        "handle": "Fancy Bits LLC",
         "installType": "direct",
         "url": "https://channels-dvr.s3.amazonaws.com/SetupChannelsDVR.exe",
         "args": "",

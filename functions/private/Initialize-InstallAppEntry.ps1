@@ -120,25 +120,32 @@ function Initialize-InstallAppEntry {
         }
         [void]$contentPanel.Children.Add($icon)
 
-        # Create the TextBlock for the application name, plus a bottom line stacked
-        # underneath it in an accent color, combining config/applications.json "subtitle"
-        # (e.g. Olivetin's "(Includes Portainer)") and "handle" (the maintainer's CDVR forum
-        # handle, e.g. "@bnhf") when both are set. Always add this TextBlock, even when an
-        # entry has neither, so every tile reserves the same two-line height - conditionally
-        # adding it made entries with one taller than every other tile in the grid.
+        # Create the TextBlock for the application name - config/applications.json "subtitle"
+        # (e.g. Olivetin's "(Includes Portainer)"), when set, becomes a second line in the
+        # same white/bold style rather than a separate element, using explicit Inlines/
+        # LineBreak since plain .Text doesn't honor embedded newlines. Below that, a second
+        # accent-colored TextBlock shows "handle" (the maintainer's CDVR forum handle, e.g.
+        # "@bnhf", or an organization name for vendor-made apps). Both are always added, even
+        # when an entry has neither, so every tile reserves the same height - conditionally
+        # adding them made entries with one taller than every other tile in the grid.
         $nameStack = New-Object Windows.Controls.StackPanel
         $nameStack.Orientation = "Vertical"
         $nameStack.VerticalAlignment = [Windows.VerticalAlignment]::Center
 
         $appName = New-Object Windows.Controls.TextBlock
         $appName.Style = $sync.Form.Resources.AppEntryNameStyle
-        $appName.Text = $app.content
+        if ($app.subtitle) {
+            [void]$appName.Inlines.Add((New-Object Windows.Documents.Run($app.content)))
+            [void]$appName.Inlines.Add((New-Object Windows.Documents.LineBreak))
+            [void]$appName.Inlines.Add((New-Object Windows.Documents.Run($app.subtitle)))
+        } else {
+            $appName.Text = $app.content
+        }
         [void]$nameStack.Children.Add($appName)
 
-        $bottomLineParts = @($app.subtitle, $app.handle) | Where-Object { $_ }
         $appSubtitle = New-Object Windows.Controls.TextBlock
         $appSubtitle.Style = $sync.Form.Resources.AppEntrySubtitleStyle
-        $appSubtitle.Text = if ($bottomLineParts.Count -gt 0) { $bottomLineParts -join " " } else { " " }
+        $appSubtitle.Text = if ($app.handle) { $app.handle } else { " " }
         [void]$nameStack.Children.Add($appSubtitle)
 
         [void]$contentPanel.Children.Add($nameStack)
