@@ -5455,185 +5455,95 @@ function Start-WinUtilProcessAsStandardUser {
         refuse outright) when run as Administrator against per-user-scope packages.
 
     .DESCRIPTION
-        Uses the "linked token" technique: when UAC elevation happens, Windows creates a
-        filtered "linked" standard-user token alongside the elevated one for the same logon
-        session. This retrieves that linked token and uses CreateProcessWithTokenW to launch
-        the target process with it, giving a real process handle/PID to wait on and read
-        ExitCode from - unlike the more commonly-referenced Explorer/Shell.Application COM
-        de-elevation trick, which doesn't hand back a usable process handle.
+        Uses the Shell.Application COM "ShellExecute" de-elevation trick: asks the already-
+        running, non-elevated explorer.exe shell process to launch the target on our behalf,
+        rather than trying to mint a de-elevated process ourselves via token APIs.
+
+        An earlier version of this helper used CreateProcessWithTokenW with the UAC "linked"
+        standard-user token, which looked correct on paper (SeImpersonatePrivilege enabled,
+        valid linked token) but reliably failed with ERROR_ACCESS_DENIED (Win32 error 5) when
+        called from an ordinary elevated process. That's a real, widely-documented limitation
+        of CreateProcessWithTokenW: it's implemented via the Secondary Logon service, which
+        applies extra checks effectively restricting it to LocalSystem-level callers, not
+        regular elevated Administrator tokens. The Shell.Application route sidesteps that
+        entirely, since Explorer - not us - creates the child process.
+
+        Because ShellExecute is fire-and-forget (no process handle/PID is returned), the
+        actual target is launched indirectly via a small generated wrapper .ps1 that runs it
+        with Start-Process -Wait, then writes the resulting exit code to a sentinel file. This
+        helper polls for that file so callers still get a reliable exit code, the same way
+        they would from Start-Process -PassThru -Wait.
 
         Falls back to running the process normally (at the current, elevated, integrity) if
-        any step fails - this is a best-effort correctness improvement, not something that
-        should ever hard-fail an install/uninstall.
+        any step fails or times out - this is a best-effort correctness improvement, not
+        something that should ever hard-fail an install/uninstall.
 
     .OUTPUTS
-        A System.Diagnostics.Process for the launched process (already exited, WaitForExit
-        already called) so callers can read .ExitCode the same way they would with
-        Start-Process -PassThru -Wait.
+        A [pscustomobject] with an .ExitCode property, so callers can read it the same way
+        they would with Start-Process -PassThru -Wait.
     #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath,
 
-        [string[]]$ArgumentList = @()
+        [string[]]$ArgumentList = @(),
+
+        [int]$TimeoutSeconds = 300
     )
 
-    if (-not ([System.Management.Automation.PSTypeName]'WinUtil.StandardUserProcessNative').Type) {
-        Add-Type -Namespace WinUtil -Name StandardUserProcessNative -MemberDefinition @'
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-public struct STARTUPINFO {
-    public int cb;
-    public string lpReserved;
-    public string lpDesktop;
-    public string lpTitle;
-    public int dwX;
-    public int dwY;
-    public int dwXSize;
-    public int dwYSize;
-    public int dwXCountChars;
-    public int dwYCountChars;
-    public int dwFillAttribute;
-    public int dwFlags;
-    public short wShowWindow;
-    public short cbReserved2;
-    public IntPtr lpReserved2;
-    public IntPtr hStdInput;
-    public IntPtr hStdOutput;
-    public IntPtr hStdError;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct PROCESS_INFORMATION {
-    public IntPtr hProcess;
-    public IntPtr hThread;
-    public int dwProcessId;
-    public int dwThreadId;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct LUID {
-    public uint LowPart;
-    public int HighPart;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct LUID_AND_ATTRIBUTES {
-    public LUID Luid;
-    public uint Attributes;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct TOKEN_PRIVILEGES {
-    public uint PrivilegeCount;
-    public LUID_AND_ATTRIBUTES Privileges;
-}
-
-[DllImport("kernel32.dll", SetLastError = true)]
-public static extern IntPtr GetCurrentProcess();
-
-[DllImport("advapi32.dll", SetLastError = true)]
-public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
-
-[DllImport("advapi32.dll", SetLastError = true)]
-public static extern bool GetTokenInformation(IntPtr TokenHandle, int TokenInformationClass, IntPtr TokenInformation, int TokenInformationLength, out int ReturnLength);
-
-[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-public static extern bool LookupPrivilegeValueW(string lpSystemName, string lpName, out LUID lpLuid);
-
-[DllImport("advapi32.dll", SetLastError = true)]
-public static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, ref TOKEN_PRIVILEGES NewState, int BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
-
-[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-public static extern bool CreateProcessWithTokenW(IntPtr hToken, uint dwLogonFlags, string lpApplicationName, string lpCommandLine, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
-
-[DllImport("kernel32.dll", SetLastError = true)]
-public static extern bool CloseHandle(IntPtr hObject);
-'@ -ErrorAction Stop
-    }
-
-    $TOKEN_QUERY = 0x0008
-    $TOKEN_ADJUST_PRIVILEGES = 0x0020
-    $TokenElevationType = 18
-    $TokenLinkedToken = 19
-    $TokenElevationTypeFull = 2
-    $SE_PRIVILEGE_ENABLED = 0x00000002
-    $LOGON_WITH_PROFILE = 0x00000001
-    $CREATE_UNICODE_ENVIRONMENT = 0x00000400
-
-    $quotedArgs = ($ArgumentList | ForEach-Object {
-        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
-    }) -join ' '
-    $commandLine = "`"$FilePath`" $quotedArgs"
-
-    $currentTokenHandle = [IntPtr]::Zero
-    $linkedTokenHandle = [IntPtr]::Zero
-    $elevationTypeBuffer = [IntPtr]::Zero
-    $linkedTokenBuffer = [IntPtr]::Zero
+    $wrapperScript = $null
+    $sentinelFile = $null
 
     try {
-        if (-not [WinUtil.StandardUserProcessNative]::OpenProcessToken([WinUtil.StandardUserProcessNative]::GetCurrentProcess(), $TOKEN_QUERY -bor $TOKEN_ADJUST_PRIVILEGES, [ref]$currentTokenHandle)) {
-            throw "OpenProcessToken failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-        }
-
-        $elevationTypeBuffer = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
-        $returnLength = 0
-        if (-not [WinUtil.StandardUserProcessNative]::GetTokenInformation($currentTokenHandle, $TokenElevationType, $elevationTypeBuffer, 4, [ref]$returnLength)) {
-            throw "GetTokenInformation(TokenElevationType) failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-        }
-        $elevationType = [Runtime.InteropServices.Marshal]::ReadInt32($elevationTypeBuffer)
-        if ($elevationType -ne $TokenElevationTypeFull) {
-            throw "Not running a full elevated (UAC split) token - nothing to de-elevate from (elevationType=$elevationType)"
-        }
-
-        $linkedTokenBuffer = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
-        if (-not [WinUtil.StandardUserProcessNative]::GetTokenInformation($currentTokenHandle, $TokenLinkedToken, $linkedTokenBuffer, [IntPtr]::Size, [ref]$returnLength)) {
-            throw "GetTokenInformation(TokenLinkedToken) failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-        }
-        $linkedTokenHandle = [Runtime.InteropServices.Marshal]::ReadIntPtr($linkedTokenBuffer)
-
-        $luid = New-Object WinUtil.StandardUserProcessNative+LUID
-        if (-not [WinUtil.StandardUserProcessNative]::LookupPrivilegeValueW($null, "SeImpersonatePrivilege", [ref]$luid)) {
-            throw "LookupPrivilegeValueW failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-        }
-        $privileges = New-Object WinUtil.StandardUserProcessNative+TOKEN_PRIVILEGES
-        $privileges.PrivilegeCount = 1
-        $privileges.Privileges = New-Object WinUtil.StandardUserProcessNative+LUID_AND_ATTRIBUTES
-        $privileges.Privileges.Luid = $luid
-        $privileges.Privileges.Attributes = $SE_PRIVILEGE_ENABLED
-        if (-not [WinUtil.StandardUserProcessNative]::AdjustTokenPrivileges($currentTokenHandle, $false, [ref]$privileges, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {
-            throw "AdjustTokenPrivileges(SeImpersonatePrivilege) failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-        }
-
-        $startupInfo = New-Object WinUtil.StandardUserProcessNative+STARTUPINFO
-        $startupInfo.cb = [Runtime.InteropServices.Marshal]::SizeOf([type]"WinUtil.StandardUserProcessNative+STARTUPINFO")
-        $processInfo = New-Object WinUtil.StandardUserProcessNative+PROCESS_INFORMATION
-
         $workingDir = Split-Path -Path $FilePath -Parent
         if ([string]::IsNullOrWhiteSpace($workingDir)) { $workingDir = $env:TEMP }
 
-        $created = [WinUtil.StandardUserProcessNative]::CreateProcessWithTokenW(
-            $linkedTokenHandle, $LOGON_WITH_PROFILE, $null, $commandLine,
-            $CREATE_UNICODE_ENVIRONMENT, [IntPtr]::Zero, $workingDir, [ref]$startupInfo, [ref]$processInfo)
+        $token = [guid]::NewGuid().ToString("N")
+        $wrapperScript = Join-Path $env:TEMP "cdvr-deelevate-$token.ps1"
+        $sentinelFile = Join-Path $env:TEMP "cdvr-deelevate-$token.txt"
 
-        if (-not $created) {
-            throw "CreateProcessWithTokenW failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+        $argArrayLiteral = "@(" + (($ArgumentList | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ', ') + ")"
+        $filePathLiteral = "'" + ($FilePath -replace "'", "''") + "'"
+        $sentinelLiteral = "'" + ($sentinelFile -replace "'", "''") + "'"
+
+        $wrapperContent = @"
+try {
+    `$p = Start-Process -FilePath $filePathLiteral -ArgumentList $argArrayLiteral -NoNewWindow -Wait -PassThru
+    `$p.ExitCode | Out-File -FilePath $sentinelLiteral -Encoding ascii
+} catch {
+    "ERROR: `$_" | Out-File -FilePath $sentinelLiteral -Encoding ascii
+}
+"@
+        Set-Content -Path $wrapperScript -Value $wrapperContent -Encoding UTF8
+
+        $shell = New-Object -ComObject "Shell.Application"
+        $shellArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrapperScript`""
+        $shell.ShellExecute("powershell.exe", $shellArgs, $workingDir, "open", 0)
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not (Test-Path $sentinelFile) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 300
         }
 
-        [void][WinUtil.StandardUserProcessNative]::CloseHandle($processInfo.hThread)
-        [void][WinUtil.StandardUserProcessNative]::CloseHandle($processInfo.hProcess)
+        if (-not (Test-Path $sentinelFile)) {
+            throw "Timed out after ${TimeoutSeconds}s waiting for de-elevated process to complete."
+        }
 
-        $proc = [System.Diagnostics.Process]::GetProcessById($processInfo.dwProcessId)
-        $proc.WaitForExit()
-        return $proc
+        $result = (Get-Content -Path $sentinelFile -Raw).Trim()
+        if ($result -like "ERROR:*") {
+            throw "De-elevated process wrapper failed: $result"
+        }
+
+        $exitCode = [int]$result
+        return [pscustomobject]@{ ExitCode = $exitCode }
     } catch {
         Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Could not run $FilePath as standard user, running elevated instead: $_"
         return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -Wait -PassThru
     } finally {
-        foreach ($ptr in @($elevationTypeBuffer, $linkedTokenBuffer)) {
-            if ($ptr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
+        foreach ($f in @($wrapperScript, $sentinelFile)) {
+            if ($f -and (Test-Path $f)) { Remove-Item -Path $f -Force -ErrorAction SilentlyContinue }
         }
-        if ($currentTokenHandle -ne [IntPtr]::Zero) { [void][WinUtil.StandardUserProcessNative]::CloseHandle($currentTokenHandle) }
-        if ($linkedTokenHandle -ne [IntPtr]::Zero) { [void][WinUtil.StandardUserProcessNative]::CloseHandle($linkedTokenHandle) }
     }
 }
 
