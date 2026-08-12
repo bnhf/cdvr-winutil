@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : 26.08.08
+    Version        : 26.08.12
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "26.08.08"
+$sync.version = "26.08.12"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -705,6 +705,53 @@ function Get-WinUtilInstalledAPPX {
     }
 
     return @($packageOutput)
+}
+
+function Get-WinUtilLanIPAddress {
+    <#
+    .SYNOPSIS
+        Returns the LAN IPv4 address of the network adapter that owns the machine's default
+        route - the address other devices on the LAN would use to reach this machine - or
+        $null if none could be confidently determined.
+
+    .DESCRIPTION
+        Finds the default-route (0.0.0.0/0) interface with the lowest route metric, the
+        standard way to identify "the adapter Windows considers primary for general traffic" -
+        but a VPN client's virtual adapter often installs an even lower-metric default route
+        than the real LAN adapter, so candidates are filtered to non-virtual, connected
+        adapters (excludes VPN TAP/TUN-style adapters, and Hyper-V/WSL/Docker's own virtual
+        switches) before picking the lowest-metric match, rather than trusting metric ordering
+        alone. Also excludes link-local (169.254.x.x/APIPA) addresses, which indicate a
+        misconfigured or disconnected adapter, not a usable LAN address.
+
+        Returns $null rather than throwing on any failure (no qualifying adapter, cmdlets
+        unavailable, etc.) - callers should have a sensible fallback for "couldn't determine
+        this" rather than treating it as fatal.
+    #>
+    try {
+        $candidateRoutes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+            Where-Object { $_.NextHop -ne '0.0.0.0' } |
+            Sort-Object RouteMetric
+
+        foreach ($route in $candidateRoutes) {
+            $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
+            if (-not $adapter -or $adapter.Status -ne 'Up' -or $adapter.Virtual) {
+                continue
+            }
+
+            $ip = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -notlike '169.254.*' } |
+                Select-Object -First 1
+
+            if ($ip) {
+                return $ip.IPAddress
+            }
+        }
+
+        return $null
+    } catch {
+        return $null
+    }
 }
 
 function Get-WinUtilPackageLogSummary {
@@ -2052,6 +2099,14 @@ Function Install-WinUtilWSLCommand {
         quoting problems of passing a command with embedded $(...) and quotes through
         `wsl -d <distro> -- bash -c "..."`.
 
+        Also substitutes {{LAN_IP}}, computed via Get-WinUtilLanIPAddress - some commands need
+        the host's actual LAN address rather than "host.docker.internal" (e.g. Olivetin's
+        CHANNELS_DVR value). Computed once per call, not per package, since it can't change
+        within a single install run and there's no reason to query it more than once. Falls
+        back to "host.docker.internal" (the previously-hardcoded value this replaced) if it
+        can't be confidently determined, rather than substituting an empty string into the
+        command.
+
         Written via Set-WinUtilNoBomFileContent, not Set-Content -Encoding UTF8 - see that
         function's own docstring for why: confirmed live, Set-Content's UTF8 encoding prepended
         a byte-order-mark under Windows PowerShell 5.1 (not PowerShell 7+, same command),
@@ -2089,10 +2144,17 @@ Function Install-WinUtilWSLCommand {
         [object[]]$Packages
     )
 
+    $lanIp = Get-WinUtilLanIPAddress
+    if ([string]::IsNullOrWhiteSpace($lanIp)) {
+        Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Could not determine a LAN IP address - falling back to host.docker.internal for {{LAN_IP}}."
+        $lanIp = "host.docker.internal"
+    }
+
     foreach ($package in $Packages) {
         $name = $package.content
         $distro = $package.distro
         $command = if ($Action -eq "Uninstall") { $package.uninstallCommand } else { $package.command }
+        if ($command) { $command = $command.Replace("{{LAN_IP}}", $lanIp) }
 
         if ([string]::IsNullOrWhiteSpace($distro) -or [string]::IsNullOrWhiteSpace($command)) {
             if ($Action -eq "Uninstall") {
@@ -10123,7 +10185,7 @@ $sync.configs.applications = @'
         "minLength": 12
       }
     ],
-    "command": "docker run -d --name olivetin-ezstart --pull always --add-host=host.docker.internal:host-gateway -p 1338:1337 -e EZ_START=-ezstart -e CHANNELS_DVR=host.docker.internal:8089 -e TZ=$(readlink /etc/localtime) -e HOST_DIR=$([[ \"$(uname)\" == \"Darwin\" ]] && echo \"$HOME\" || echo \"/data\") -e PORTAINER_PASSWORD='{{PORTAINER_PASSWORD}}' -v /config -v /var/run/docker.sock:/var/run/docker.sock bnhf/olivetin:latest",
+    "command": "docker run -d --name olivetin-ezstart --pull always --add-host=host.docker.internal:host-gateway -p 1338:1337 -e EZ_START=-ezstart -e CHANNELS_DVR={{LAN_IP}}:8089 -e TZ=$(readlink /etc/localtime) -e HOST_DIR=$([[ \"$(uname)\" == \"Darwin\" ]] && echo \"$HOME\" || echo \"/data\") -e PORTAINER_PASSWORD='{{PORTAINER_PASSWORD}}' -v /config -v /var/run/docker.sock:/var/run/docker.sock bnhf/olivetin:latest",
     "uninstallCommand": "docker rm -f olivetin-ezstart",
     "foss": false
   },

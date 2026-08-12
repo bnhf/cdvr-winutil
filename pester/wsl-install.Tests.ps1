@@ -20,6 +20,7 @@ BeforeAll {
     function Test-WinUtilWSLDistroInstalled { param($Distro) $true }
     function Set-WinUtilNoBomFileContent { param($Path, $Value) }
     function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
+    function Get-WinUtilLanIPAddress { "192.168.1.50" }
 }
 
 Describe "Install-WinUtilFeatureWSL" {
@@ -134,6 +135,32 @@ Describe "Install-WinUtilWSLCommand" {
         Mock Invoke-WinUtilWithTimeout { & $ScriptBlock @ArgumentList }
         Mock Set-WinUtilNoBomFileContent { }
         Mock Remove-Item { }
+        Mock Get-WinUtilLanIPAddress { "192.168.1.50" }
+    }
+
+    It "substitutes {{LAN_IP}} with the detected LAN address" {
+        # This is what CHANNELS_DVR in Olivetin's command now uses instead of a hardcoded
+        # "host.docker.internal" - see Get-WinUtilLanIPAddress.ps1 for why.
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run -e CHANNELS_DVR={{LAN_IP}}:8089 image" }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Set-WinUtilNoBomFileContent -Times 1 -Exactly -ParameterFilter {
+            $Value -eq "docker run -e CHANNELS_DVR=192.168.1.50:8089 image"
+        }
+    }
+
+    It "falls back to host.docker.internal for {{LAN_IP}} when it can't be determined" {
+        Mock Get-WinUtilLanIPAddress { $null }
+
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run -e CHANNELS_DVR={{LAN_IP}}:8089 image" }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Set-WinUtilNoBomFileContent -Times 1 -Exactly -ParameterFilter {
+            $Value -eq "docker run -e CHANNELS_DVR=host.docker.internal:8089 image"
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "WARN" -and $Message -like "Could not determine a LAN IP address*"
+        }
     }
 
     It "runs the command and logs completion on success" {
