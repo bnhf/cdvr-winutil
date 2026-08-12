@@ -247,6 +247,35 @@ Describe "Preset config" {
     }
 }
 
+Describe "Olivetin application config" {
+    # Regression guard for the real production config, not just the function logic (already
+    # covered generically in wsl-install.Tests.ps1) - EZ-Start's own "olivetin" and "portainer"
+    # containers/images/volume are created by a bootstrapper (olivetin-ezstart) opaque to
+    # WinUtil, so the only way to catch a future accidental edit breaking cleanup/stop behavior
+    # is to check the actual command strings in applications.json.
+    BeforeAll {
+        $script:olivetin = (Get-WinUtilConfigObject -Name "applications").olivetin
+    }
+
+    It "only stops olivetin-ezstart after confirming the olivetin container is running" {
+        $command = $script:olivetin.command
+        $command | Should -Match "docker stop olivetin-ezstart"
+        $command | Should -Match "status=running"
+
+        $lines = $command -split "`n"
+        $checkLine = (0..($lines.Count - 1) | Where-Object { $lines[$_] -match "docker ps -q" } | Select-Object -First 1)
+        $stopLine = (0..($lines.Count - 1) | Where-Object { $lines[$_] -match "docker stop olivetin-ezstart" } | Select-Object -First 1)
+        $stopLine | Should -BeGreaterThan $checkLine
+    }
+
+    It "removes the olivetin/portainer containers, their images, and the portainer_data volume on uninstall" {
+        $uninstallCommand = $script:olivetin.uninstallCommand
+        $uninstallCommand | Should -Match "docker rm -f olivetin-ezstart olivetin portainer"
+        $uninstallCommand | Should -Match "docker volume rm portainer_data"
+        $uninstallCommand | Should -Match "docker rmi"
+    }
+}
+
 Describe "App navigation config" {
     It "is wired to an existing XAML target grid" {
         $mainScript = Get-Content -Path $script:mainScriptPath -Raw
