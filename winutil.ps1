@@ -2653,9 +2653,10 @@ Function Invoke-WinUtilCurrentSystem {
         }
     }
 
-    # WSL-based entries (wslFeature/wslDistro) carry no winget/choco id at all, so they need
-    # their own checks - this runs for either package-manager preference, since $CheckBox is
-    # "choco" xor "winget" per call (never both), while WSL detection isn't preference-specific.
+    # WSL-based entries (wslFeature/wslDistro/wslCommand) and "direct"/"github" entries (real
+    # installers with no winget/choco id at all, e.g. Channels DVR, Clicker) all need their own
+    # checks - this runs for either package-manager preference, since $CheckBox is "choco" xor
+    # "winget" per call (never both), while none of this is preference-specific.
     if ($CheckBox -eq "choco" -or $CheckBox -eq "winget") {
         foreach ($entry in $appsToCheck) {
             switch ($entry.Value.installType) {
@@ -2664,6 +2665,21 @@ Function Invoke-WinUtilCurrentSystem {
                 }
                 "wslDistro" {
                     if ($entry.Value.distro -and (Test-WinUtilWSLDistroInstalled -Distro $entry.Value.distro)) {
+                        Write-Output $entry.Key
+                    }
+                }
+                "wslCommand" {
+                    if ($entry.Value.distro -and $entry.Value.installCheckCommand -and
+                        (Test-WinUtilWSLCommandInstalled -Distro $entry.Value.distro -InstallCheckCommand $entry.Value.installCheckCommand)) {
+                        Write-Output $entry.Key
+                    }
+                }
+                { $_ -eq "direct" -or $_ -eq "github" } {
+                    # No winget/choco/WSL-based signal exists for these - fall back to probing
+                    # the catalog's own "webui" URL (already used for the app's "Open" button)
+                    # when one is declared. Entries with neither (e.g. Clicker) can't be detected
+                    # this way and are left unchecked, same as before this fix.
+                    if ($entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)) {
                         Write-Output $entry.Key
                     }
                 }
@@ -6813,6 +6829,89 @@ function Test-WinUtilVirtualizationFirmwareEnabled {
     }
 }
 
+function Test-WinUtilWebUIReachable {
+    <#
+    .SYNOPSIS
+        Returns $true if a webui URL's host:port accepts a TCP connection - used as an "is this
+        installed" signal by "Show Installed Apps" for packages with no winget/choco/WSL-based
+        detection (installType "direct"/"github", e.g. Channels DVR Server), since the catalog
+        already carries this URL for the app's own "Open" button and most of these are always-on
+        local server apps once installed.
+
+    .DESCRIPTION
+        Checks raw TCP connectivity rather than making a real HTTP request - a non-200 response
+        (auth required, redirect, self-signed cert, non-root path, ...) still proves the server
+        is up, and a plain socket connect avoids all of that without needing to interpret HTTP
+        semantics at all. Bounded to 1.5s so a single unreachable app can't noticeably slow down
+        "Show Installed Apps" scanning through the whole catalog.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+
+    try {
+        $uri = [uri]$Url
+        $port = if ($uri.Port -gt 0) { $uri.Port } elseif ($uri.Scheme -eq 'https') { 443 } else { 80 }
+
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $connectTask = $client.ConnectAsync($uri.Host, $port)
+            if (-not $connectTask.Wait(1500)) {
+                return $false
+            }
+            return $client.Connected
+        } finally {
+            $client.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Test-WinUtilWSLCommandInstalled {
+    <#
+    .SYNOPSIS
+        Returns $true if a wslCommand package's installCheckCommand exits successfully inside
+        its distro - used by "Show Installed Apps" for packages with no winget/choco id (e.g.
+        Olivetin, installed via a "docker run" command inside WSL rather than a Windows package
+        manager, so there's nothing for Test-WinUtilProgramInstalled to look up).
+
+    .DESCRIPTION
+        installCheckCommand is data-driven (from applications.json), not hardcoded here, the
+        same way command/uninstallCommand already are for wslCommand packages - e.g. Olivetin's
+        is "docker inspect olivetin-ezstart", which exits 0 if that named container exists
+        (installed, regardless of whether it's currently running) and non-zero if it doesn't.
+        Deliberately checks container existence, not "docker ps" (running containers only) -
+        a stopped-but-installed container should still count as installed.
+
+        Bounded via Invoke-WinUtilWithTimeout, not run directly, for the same reason every other
+        wsl.exe call in this codebase is - it can occasionally hang for reasons unrelated to the
+        specific command being run (see Install-WinUtilWSLDistro.ps1 for a confirmed real case).
+        A short timeout (this is a lightweight inspect, not a real install operation) that
+        defaults to "not installed" on failure - "Show Installed Apps" scanning the whole
+        catalog shouldn't stall on one slow/hung check.
+    #>
+    param(
+        [string]$Distro,
+        [string]$InstallCheckCommand
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Distro) -or [string]::IsNullOrWhiteSpace($InstallCheckCommand)) {
+        return $false
+    }
+
+    Invoke-WinUtilWithTimeout -TimeoutSeconds 15 -DefaultValue $false -ArgumentList @($Distro, $InstallCheckCommand) -ScriptBlock {
+        param($Distro, $InstallCheckCommand)
+        try {
+            & wsl -d $Distro -- bash -c $InstallCheckCommand *>&1 | Out-Null
+            return $LASTEXITCODE -eq 0
+        } catch {
+            return $false
+        }
+    }
+}
+
 function Test-WinUtilWSLDistroInstalled {
     <#
     .SYNOPSIS
@@ -10358,6 +10457,7 @@ $sync.configs.applications = @'
     ],
     "command": "docker run -d --name olivetin-ezstart --pull always --add-host=host.docker.internal:host-gateway -p 1338:1337 -e EZ_START=-ezstart -e CHANNELS_DVR={{LAN_IP}}:8089 -e TZ=$(readlink /etc/localtime) -e HOST_DIR=$([[ \"$(uname)\" == \"Darwin\" ]] && echo \"$HOME\" || echo \"/data\") -e PORTAINER_PASSWORD='{{PORTAINER_PASSWORD}}' -v /config -v /var/run/docker.sock:/var/run/docker.sock bnhf/olivetin:latest",
     "uninstallCommand": "docker rm -f olivetin-ezstart",
+    "installCheckCommand": "docker inspect olivetin-ezstart",
     "foss": false
   },
   "WPFInstallstreamlinkmanager": {

@@ -20,6 +20,8 @@ BeforeAll {
     }
     function Test-WinUtilWSLFeatureEnabled { $false }
     function Test-WinUtilWSLDistroInstalled { param($Distro) $false }
+    function Test-WinUtilWSLCommandInstalled { param($Distro, $InstallCheckCommand) $false }
+    function Test-WinUtilWebUIReachable { param($Url) $false }
     function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
     function Write-WinUtilLog { }
 }
@@ -151,6 +153,77 @@ Describe "Invoke-WinUtilCurrentSystem WSL detection" {
 
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
         $result | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
+    # Regression guard: this whole switch case block didn't exist before - "direct" (Channels
+    # DVR), "github" (Clicker), and "wslCommand" (Olivetin) install types were never handled by
+    # "Show Installed Apps" at all, so those checkboxes could never get checked no matter what
+    # was actually installed.
+    BeforeEach {
+        $script:sync = [Hashtable]::Synchronized(@{
+            configs = [pscustomobject]@{
+                applicationsHashtable = @{
+                    WPFInstallchannelsdvr = [pscustomobject]@{ installType = "direct"; webui = "http://localhost:8089" }
+                    WPFInstallrustdvr = [pscustomobject]@{ installType = "github"; webui = $null }
+                    WPFInstallolivetin = [pscustomobject]@{ installType = "wslCommand"; distro = "Debian"; installCheckCommand = "docker inspect olivetin-ezstart" }
+                }
+            }
+        })
+        Mock winget {
+            $global:LASTEXITCODE = 0
+            @("No installed package found matching input criteria.")
+        }
+        Mock choco { @() }
+    }
+
+    AfterEach {
+        Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "detects a direct-install package via its webui reachability" {
+        Mock Test-WinUtilWebUIReachable { $true } -ParameterFilter { $Url -eq "http://localhost:8089" }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Contain "WPFInstallchannelsdvr"
+        Should -Invoke -CommandName Test-WinUtilWebUIReachable -Times 1 -Exactly -ParameterFilter { $Url -eq "http://localhost:8089" }
+    }
+
+    It "does not report a direct-install package as installed when its webui isn't reachable" {
+        Mock Test-WinUtilWebUIReachable { $false }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Not -Contain "WPFInstallchannelsdvr"
+    }
+
+    It "leaves a github-install package undetected when it has no webui declared" {
+        Mock Test-WinUtilWebUIReachable { $true }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Not -Contain "WPFInstallrustdvr"
+        Should -Invoke -CommandName Test-WinUtilWebUIReachable -Times 0 -Exactly -ParameterFilter { $Url -eq $null }
+    }
+
+    It "detects a wslCommand package via its installCheckCommand" {
+        Mock Test-WinUtilWSLCommandInstalled { $true } -ParameterFilter {
+            $Distro -eq "Debian" -and $InstallCheckCommand -eq "docker inspect olivetin-ezstart"
+        }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Contain "WPFInstallolivetin"
+    }
+
+    It "does not report a wslCommand package as installed when its installCheckCommand fails" {
+        Mock Test-WinUtilWSLCommandInstalled { $false }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Not -Contain "WPFInstallolivetin"
     }
 }
 

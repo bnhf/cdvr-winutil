@@ -70,9 +70,10 @@ Function Invoke-WinUtilCurrentSystem {
         }
     }
 
-    # WSL-based entries (wslFeature/wslDistro) carry no winget/choco id at all, so they need
-    # their own checks - this runs for either package-manager preference, since $CheckBox is
-    # "choco" xor "winget" per call (never both), while WSL detection isn't preference-specific.
+    # WSL-based entries (wslFeature/wslDistro/wslCommand) and "direct"/"github" entries (real
+    # installers with no winget/choco id at all, e.g. Channels DVR, Clicker) all need their own
+    # checks - this runs for either package-manager preference, since $CheckBox is "choco" xor
+    # "winget" per call (never both), while none of this is preference-specific.
     if ($CheckBox -eq "choco" -or $CheckBox -eq "winget") {
         foreach ($entry in $appsToCheck) {
             switch ($entry.Value.installType) {
@@ -81,6 +82,21 @@ Function Invoke-WinUtilCurrentSystem {
                 }
                 "wslDistro" {
                     if ($entry.Value.distro -and (Test-WinUtilWSLDistroInstalled -Distro $entry.Value.distro)) {
+                        Write-Output $entry.Key
+                    }
+                }
+                "wslCommand" {
+                    if ($entry.Value.distro -and $entry.Value.installCheckCommand -and
+                        (Test-WinUtilWSLCommandInstalled -Distro $entry.Value.distro -InstallCheckCommand $entry.Value.installCheckCommand)) {
+                        Write-Output $entry.Key
+                    }
+                }
+                { $_ -eq "direct" -or $_ -eq "github" } {
+                    # No winget/choco/WSL-based signal exists for these - fall back to probing
+                    # the catalog's own "webui" URL (already used for the app's "Open" button)
+                    # when one is declared. Entries with neither (e.g. Clicker) can't be detected
+                    # this way and are left unchecked, same as before this fix.
+                    if ($entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)) {
                         Write-Output $entry.Key
                     }
                 }
