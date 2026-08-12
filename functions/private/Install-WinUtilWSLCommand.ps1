@@ -40,6 +40,22 @@ Function Install-WinUtilWSLCommand {
         not found") was still logged as "install completed", because only the ABSENCE of output
         was treated as a problem before, not a non-zero exit code.
 
+        The wsl.exe call's output is captured via 2>&1, which wraps every stderr line as an
+        [ErrorRecord] rather than a plain string - confirmed live: installing Olivetin (which
+        runs "docker pull" inside the distro) logged a real success ("Digest:", "Status: Image
+        is up to date", the container ID all present, exit code 0) alongside what LOOKED like a
+        crash - docker's own progress line on stderr ("latest: Pulling from bnhf/olivetin") came
+        through as a full "NativeCommandError" dump (message, "At line:X char:Y", the "+ ~~~~"
+        source pointer, CategoryInfo, FullyQualifiedErrorId), not the plain text docker actually
+        wrote. The ForEach-Object below converts each ErrorRecord to its plain .Exception.Message
+        before Out-String ever sees it, so the log shows what the command actually printed
+        instead of PowerShell's formatting for it. Inlined rather than a shared helper function,
+        because this runs inside Invoke-WinUtilWithTimeout's isolated runspace, which (per that
+        function's own docstring) can't see functions defined in the caller's scope. The same
+        inline fix is applied everywhere else in this codebase that captures wsl.exe output the
+        same way (Install-WinUtilWSLDistro.ps1, Install-WinUtilFeatureWSL.ps1,
+        Uninstall-WinUtilFeatureWSL.ps1, Uninstall-WinUtilWSLDistro.ps1), for the same reason.
+
         Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
         used elsewhere for quick DISM/registry checks - these commands can do real work (e.g.
         pulling a Docker image) that legitimately takes a while, and wsl.exe itself can hang for
@@ -105,7 +121,9 @@ Function Install-WinUtilWSLCommand {
             } -ScriptBlock {
                 param($distro, $scriptName)
                 try {
-                    $scriptOutput = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+                    $scriptOutput = ((& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1) | ForEach-Object {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                    } | Out-String).Trim()
                     return [pscustomobject]@{ Output = $scriptOutput; ExitCode = $LASTEXITCODE }
                 } catch {
                     return [pscustomobject]@{ Output = $null; ExitCode = -1 }

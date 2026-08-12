@@ -212,6 +212,29 @@ Describe "Install-WinUtilWSLCommand" {
         Should -Invoke -CommandName Write-WinUtilLog -Times 0 -Exactly -ParameterFilter { $Message -eq "Olivetin install completed." }
     }
 
+    It "logs the plain stderr text, not PowerShell's ErrorRecord formatting, when the command writes to stderr" {
+        # Regression guard for a real production case: installing Olivetin (which runs "docker
+        # pull" inside the distro) logged a genuine success (exit 0, correct output) alongside
+        # what looked like a crash - docker's own progress line on stderr came through as a full
+        # "NativeCommandError" dump (message, "At line:X char:Y", CategoryInfo,
+        # FullyQualifiedErrorId) instead of the plain text docker actually wrote, because 2>&1
+        # wraps stderr lines as [ErrorRecord] objects that Out-String formats verbosely.
+        Mock wsl {
+            $global:LASTEXITCODE = 0
+            Write-Error "latest: Pulling from bnhf/olivetin" -ErrorAction Continue
+            "Status: Image is up to date for bnhf/olivetin:latest"
+        }
+
+        $package = [pscustomobject]@{ Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker pull bnhf/olivetin" }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Message -like "*latest: Pulling from bnhf/olivetin*" -and
+                $Message -notlike "*CategoryInfo*" -and
+                $Message -notlike "*NativeCommandError*"
+        }
+    }
+
     It "checks docker availability first when requiresDockerInDistro is set, and skips the install if it's not available" {
         # Regression guard for the actual reported bug: Docker Desktop installed but WSL
         # integration not enabled for Debian - running the install anyway just fails deep inside

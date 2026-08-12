@@ -33,6 +33,11 @@ Function Uninstall-WinUtilFeatureWSL {
         specific command (see Install-WinUtilWSLDistro.ps1 for a confirmed real case on the
         install side), and there's no reason to trust --shutdown/--uninstall are immune just
         because they aren't known to hit that exact case.
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -68,7 +73,9 @@ Function Uninstall-WinUtilFeatureWSL {
         } -ScriptBlock {
             try {
                 & wsl --shutdown 2>&1 | Out-Null
-                return (& wsl --uninstall 2>&1 | Out-String).Trim()
+                return ((& wsl --uninstall 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }

@@ -15,6 +15,11 @@ Function Uninstall-WinUtilWSLDistro {
         it unconditionally either). Verifies success afterward via Test-WinUtilWSLDistroInstalled
         rather than trusting wsl.exe's own exit behavior, for the same reason a timeout here
         isn't necessarily a real failure.
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -45,7 +50,9 @@ Function Uninstall-WinUtilWSLDistro {
             param($distro)
             try {
                 & wsl --terminate $distro 2>&1 | Out-Null
-                return (& wsl --unregister $distro 2>&1 | Out-String).Trim()
+                return ((& wsl --unregister $distro 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }

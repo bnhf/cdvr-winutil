@@ -1569,6 +1569,11 @@ Function Install-WinUtilFeatureWSL {
         WSL2 may already be fully enabled underneath it (confirmed live for the sibling distro
         install below: the distro had already finished registering while the wsl.exe call
         itself never returned control to us).
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -1585,7 +1590,9 @@ Function Install-WinUtilFeatureWSL {
             Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
         } -ScriptBlock {
             try {
-                return (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+                return ((& wsl --install --no-distribution 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }
@@ -2165,6 +2172,22 @@ Function Install-WinUtilWSLCommand {
         not found") was still logged as "install completed", because only the ABSENCE of output
         was treated as a problem before, not a non-zero exit code.
 
+        The wsl.exe call's output is captured via 2>&1, which wraps every stderr line as an
+        [ErrorRecord] rather than a plain string - confirmed live: installing Olivetin (which
+        runs "docker pull" inside the distro) logged a real success ("Digest:", "Status: Image
+        is up to date", the container ID all present, exit code 0) alongside what LOOKED like a
+        crash - docker's own progress line on stderr ("latest: Pulling from bnhf/olivetin") came
+        through as a full "NativeCommandError" dump (message, "At line:X char:Y", the "+ ~~~~"
+        source pointer, CategoryInfo, FullyQualifiedErrorId), not the plain text docker actually
+        wrote. The ForEach-Object below converts each ErrorRecord to its plain .Exception.Message
+        before Out-String ever sees it, so the log shows what the command actually printed
+        instead of PowerShell's formatting for it. Inlined rather than a shared helper function,
+        because this runs inside Invoke-WinUtilWithTimeout's isolated runspace, which (per that
+        function's own docstring) can't see functions defined in the caller's scope. The same
+        inline fix is applied everywhere else in this codebase that captures wsl.exe output the
+        same way (Install-WinUtilWSLDistro.ps1, Install-WinUtilFeatureWSL.ps1,
+        Uninstall-WinUtilFeatureWSL.ps1, Uninstall-WinUtilWSLDistro.ps1), for the same reason.
+
         Bounded to several minutes via Invoke-WinUtilWithTimeout, not the few-second default
         used elsewhere for quick DISM/registry checks - these commands can do real work (e.g.
         pulling a Docker image) that legitimately takes a while, and wsl.exe itself can hang for
@@ -2230,7 +2253,9 @@ Function Install-WinUtilWSLCommand {
             } -ScriptBlock {
                 param($distro, $scriptName)
                 try {
-                    $scriptOutput = (& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1 | Out-String).Trim()
+                    $scriptOutput = ((& wsl -d $distro -- bash "/tmp/$scriptName" 2>&1) | ForEach-Object {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                    } | Out-String).Trim()
                     return [pscustomobject]@{ Output = $scriptOutput; ExitCode = $LASTEXITCODE }
                 } catch {
                     return [pscustomobject]@{ Output = $null; ExitCode = -1 }
@@ -2287,6 +2312,11 @@ Function Install-WinUtilWSLDistro {
         confirmed real case above produced zero console/progress feedback for its full 5-minute
         wait despite genuinely succeeding, which read as a stalled/broken app rather than a
         slow-but-working one.
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -2311,7 +2341,9 @@ Function Install-WinUtilWSLDistro {
         } -ScriptBlock {
             param($distro)
             try {
-                return (& wsl --install -d $distro 2>&1 | Out-String).Trim()
+                return ((& wsl --install -d $distro 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }
@@ -6922,6 +6954,11 @@ Function Uninstall-WinUtilFeatureWSL {
         specific command (see Install-WinUtilWSLDistro.ps1 for a confirmed real case on the
         install side), and there's no reason to trust --shutdown/--uninstall are immune just
         because they aren't known to hit that exact case.
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -6957,7 +6994,9 @@ Function Uninstall-WinUtilFeatureWSL {
         } -ScriptBlock {
             try {
                 & wsl --shutdown 2>&1 | Out-Null
-                return (& wsl --uninstall 2>&1 | Out-String).Trim()
+                return ((& wsl --uninstall 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }
@@ -7101,6 +7140,11 @@ Function Uninstall-WinUtilWSLDistro {
         it unconditionally either). Verifies success afterward via Test-WinUtilWSLDistroInstalled
         rather than trusting wsl.exe's own exit behavior, for the same reason a timeout here
         isn't necessarily a real failure.
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -7131,7 +7175,9 @@ Function Uninstall-WinUtilWSLDistro {
             param($distro)
             try {
                 & wsl --terminate $distro 2>&1 | Out-Null
-                return (& wsl --unregister $distro 2>&1 | Out-String).Trim()
+                return ((& wsl --unregister $distro 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }

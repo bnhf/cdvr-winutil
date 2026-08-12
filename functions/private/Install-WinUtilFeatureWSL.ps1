@@ -15,6 +15,11 @@ Function Install-WinUtilFeatureWSL {
         WSL2 may already be fully enabled underneath it (confirmed live for the sibling distro
         install below: the distro had already finished registering while the wsl.exe call
         itself never returned control to us).
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -31,7 +36,9 @@ Function Install-WinUtilFeatureWSL {
             Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
         } -ScriptBlock {
             try {
-                return (& wsl --install --no-distribution 2>&1 | Out-String).Trim()
+                return ((& wsl --install --no-distribution 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }

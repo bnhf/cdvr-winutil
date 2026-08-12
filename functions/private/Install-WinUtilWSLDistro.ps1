@@ -29,6 +29,11 @@ Function Install-WinUtilWSLDistro {
         confirmed real case above produced zero console/progress feedback for its full 5-minute
         wait despite genuinely succeeding, which read as a stalled/broken app rather than a
         slow-but-working one.
+
+        wsl.exe's output is captured via 2>&1, which wraps stderr lines as [ErrorRecord] rather
+        than plain strings, so each is converted to its plain .Exception.Message before
+        Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
+        case (a genuinely successful install logging what looked like a crash).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -53,7 +58,9 @@ Function Install-WinUtilWSLDistro {
         } -ScriptBlock {
             param($distro)
             try {
-                return (& wsl --install -d $distro 2>&1 | Out-String).Trim()
+                return ((& wsl --install -d $distro 2>&1) | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Out-String).Trim()
             } catch {
                 return $null
             }
