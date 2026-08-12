@@ -7,6 +7,13 @@ Function Uninstall-WinUtilProgramDirect {
         an existing install and offers to uninstall (uninstallViaInstaller: true) - the
         correct approach for apps with no separate uninstaller, since we can't reliably infer
         everything a vendor's own installer cleans up.
+
+    .DESCRIPTION
+        The uninstallViaInstaller relaunch is de-elevated the same way, and for the same
+        reason, as Install-WinUtilProgramDirect - see that function's own docstring. Uses
+        Start-WinUtilProcessAsStandardUserNoWait rather than the waiting variant since this
+        relaunch is the same "never exits, don't wait for it" shape as that function's no-args
+        interactive branch (the installer stays open for the user to click Uninstall in it).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -43,8 +50,10 @@ Function Uninstall-WinUtilProgramDirect {
 
             Write-WinUtilLog -Component "Package" -Message "Launching $name installer - it should detect the existing install and offer to uninstall. Stop $name first if it's running, then choose Uninstall in the window that opens. WinUtil will not wait for it to close."
             try {
-                $proc = Start-Process -FilePath $dest -PassThru
-                Set-WinUtilProcessForeground -Process $proc
+                if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest)) {
+                    $proc = Start-Process -FilePath $dest -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                }
             } catch {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to launch uninstaller for ${name}: $_"
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue

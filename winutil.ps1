@@ -1717,6 +1717,25 @@ Function Install-WinUtilProgramDirect {
     <#
     .SYNOPSIS
         Downloads and runs an installer from a direct URL - for packages with no winget/choco listing.
+
+    .DESCRIPTION
+        Runs the installer de-elevated (as the standard user), not inheriting WinUtil's own
+        elevated context. Confirmed live this was NOT the case before: WinUtil always
+        self-elevates at startup, this function runs inside the install runspace spawned from
+        that elevated process, and none of its three Start-Process calls did anything to
+        counteract that - so e.g. Channels DVR Server's installer, and the app it leaves running
+        afterward, launched as Administrator. That matters beyond just "more privilege than
+        needed": an app that installs/runs elevated once can leave behind admin-owned config or
+        data it can no longer read/write on a later normal (non-elevated) run.
+
+        Uses Start-WinUtilProcessAsStandardUser (waits, gives a real exit code) for the MSI and
+        explicit-args branches, and Start-WinUtilProcessAsStandardUserNoWait for the no-args
+        interactive branch - that branch deliberately never waits on the launched process (see
+        its own comment below), and Start-WinUtilProcessAsStandardUser's wait-based
+        fallback-to-elevated-on-timeout would misfire on a target that's expected to still be
+        running, launching it a second time. Falls back to running elevated (with a logged
+        warning) if de-elevation itself fails for any reason, the same best-effort philosophy as
+        the winget install path.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -1748,20 +1767,30 @@ Function Install-WinUtilProgramDirect {
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
         try {
             if ($ext -eq ".msi") {
-                Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$dest`" $installArgs" -Wait
+                Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`" $installArgs") | Out-Null
                 Write-WinUtilLog -Component "Package" -Message "$name installed."
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue
             } elseif ([string]::IsNullOrWhiteSpace($installArgs)) {
                 # No documented silent-install flag, so this runs interactively - and some
                 # interactive installers (e.g. Channels DVR Server) launch a long-running
-                # application on completion that never exits, which would make -Wait block
-                # forever. Launch and move on instead of waiting; don't delete the downloaded
-                # file since the process may still be reading it after we return.
-                $proc = Start-Process -FilePath $dest -PassThru
-                Set-WinUtilProcessForeground -Process $proc
-                Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                # application on completion that never exits, which would make waiting for it
+                # block forever. Launch and move on instead of waiting; don't delete the
+                # downloaded file since the process may still be reading it after we return.
+                #
+                # De-elevated via the fire-and-forget helper, not Start-WinUtilProcessAsStandardUser -
+                # that one waits for an exit code, and its own fallback-to-elevated-on-timeout would
+                # misfire here since not exiting is expected, not a failure. No process handle comes
+                # back from that path, so Set-WinUtilProcessForeground (which needs one) only runs on
+                # the elevated fallback - a minor, accepted UX tradeoff for launching de-elevated.
+                if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest) {
+                    Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                } else {
+                    $proc = Start-Process -FilePath $dest -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                    Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                }
             } else {
-                Start-Process -FilePath $dest -ArgumentList $installArgs -Wait
+                Start-WinUtilProcessAsStandardUser -FilePath $dest -ArgumentList @($installArgs) | Out-Null
                 Write-WinUtilLog -Component "Package" -Message "$name installed."
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue
             }
@@ -1777,6 +1806,10 @@ Function Install-WinUtilProgramGithub {
     .SYNOPSIS
         Downloads and runs the newest matching release asset from a GitHub repo - for
         Channels DVR community projects not published to winget/choco.
+
+    .DESCRIPTION
+        De-elevated the same way, and for the same reason, as Install-WinUtilProgramDirect -
+        see that function's own docstring.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -1834,18 +1867,22 @@ Function Install-WinUtilProgramGithub {
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
         try {
             if ($dest -like "*.msi") {
-                Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$dest`"" -Wait
+                Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`"") | Out-Null
                 Write-WinUtilLog -Component "Package" -Message "$name installed."
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue
             } else {
                 # No known silent-install flag for these community-released installers, so this
                 # runs interactively - and some interactive installers launch a long-running
-                # application on completion that never exits, which would make -Wait block
-                # forever. Launch and move on instead of waiting; don't delete the downloaded
-                # file since the process may still be reading it after we return.
-                $proc = Start-Process -FilePath $dest -PassThru
-                Set-WinUtilProcessForeground -Process $proc
-                Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                # application on completion that never exits, which would make waiting for it
+                # block forever. Launch and move on instead of waiting; don't delete the
+                # downloaded file since the process may still be reading it after we return.
+                if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest) {
+                    Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                } else {
+                    $proc = Start-Process -FilePath $dest -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                    Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                }
             }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run installer for ${name}: $_"
@@ -6472,6 +6509,85 @@ try {
     }
 }
 
+function Start-WinUtilProcessAsStandardUserNoWait {
+    <#
+    .SYNOPSIS
+        Launches a process at the user's normal (non-elevated) integrity level from within
+        WinUtil's elevated process, without waiting for it to exit - for installers that launch
+        a long-running application on completion (e.g. Channels DVR Server's installer starts
+        the DVR engine itself when the wizard finishes, which never exits on its own).
+
+    .DESCRIPTION
+        A separate function from Start-WinUtilProcessAsStandardUser, not a -NoWait switch on it -
+        that function's de-elevation works by running the target through a generated wrapper
+        script that does Start-Process -Wait, then polls for a sentinel file the wrapper writes
+        with the exit code. For a target that never exits, that wrapper's own -Wait would hang
+        forever too, and that function's "de-elevation failed, run elevated instead" fallback
+        would incorrectly trigger on the resulting timeout - launching the installer a second
+        time, elevated, on top of the still-running de-elevated one. A never-exiting target isn't
+        a failure here, so it can't share that function's contract.
+
+        Uses the same Scheduled Task + RunLevel "Limited" technique (see that function's own
+        docstring for why this approach and not CreateProcessWithTokenW/Shell.Application COM,
+        both of which proved unreliable), but the task's action launches the target directly -
+        no wrapper script, no sentinel file, no waiting, since there is no exit code to report
+        back and callers here don't need one.
+
+        The task registration is removed shortly after starting, not left around - this only
+        unregisters the task definition, not the process it already spawned, the same way
+        deleting a shortcut doesn't close a program already launched from it.
+
+    .OUTPUTS
+        $true if the task was registered and started (the target was launched, though its own
+        success/failure afterward is unknown - the same as calling Start-Process and not waiting).
+        $false if de-elevation itself could not be set up, in which case the caller should fall
+        back to launching the process normally (elevated).
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [string[]]$ArgumentList = @()
+    )
+
+    $taskName = $null
+
+    try {
+        $workingDir = Split-Path -Path $FilePath -Parent
+        if ([string]::IsNullOrWhiteSpace($workingDir)) { $workingDir = $env:TEMP }
+
+        $taskName = "CDVR-WinUtil-Deelevate-NoWait-$([guid]::NewGuid().ToString('N'))"
+
+        Import-Module ScheduledTasks -ErrorAction Stop
+
+        $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $argumentString = $ArgumentList -join ' '
+        $actionParams = @{ Execute = $FilePath; WorkingDirectory = $workingDir }
+        if (-not [string]::IsNullOrWhiteSpace($argumentString)) { $actionParams.Argument = $argumentString }
+        $action = New-ScheduledTaskAction @actionParams
+        $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel
+        $task = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
+
+        Register-ScheduledTask -TaskName $taskName -InputObject $task -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+        # Give Task Scheduler a moment to actually spawn the process before unregistering the
+        # task definition - unregistering doesn't touch the already-spawned process, but doing
+        # it before Start-ScheduledTask has taken effect could plausibly race with the launch.
+        Start-Sleep -Seconds 2
+
+        return $true
+    } catch {
+        Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Could not launch $FilePath as standard user, running elevated instead: $_"
+        return $false
+    } finally {
+        if ($taskName -and (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-WinUtilDockerAvailableInWSL {
     <#
     .SYNOPSIS
@@ -6872,6 +6988,13 @@ Function Uninstall-WinUtilProgramDirect {
         an existing install and offers to uninstall (uninstallViaInstaller: true) - the
         correct approach for apps with no separate uninstaller, since we can't reliably infer
         everything a vendor's own installer cleans up.
+
+    .DESCRIPTION
+        The uninstallViaInstaller relaunch is de-elevated the same way, and for the same
+        reason, as Install-WinUtilProgramDirect - see that function's own docstring. Uses
+        Start-WinUtilProcessAsStandardUserNoWait rather than the waiting variant since this
+        relaunch is the same "never exits, don't wait for it" shape as that function's no-args
+        interactive branch (the installer stays open for the user to click Uninstall in it).
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -6908,8 +7031,10 @@ Function Uninstall-WinUtilProgramDirect {
 
             Write-WinUtilLog -Component "Package" -Message "Launching $name installer - it should detect the existing install and offer to uninstall. Stop $name first if it's running, then choose Uninstall in the window that opens. WinUtil will not wait for it to close."
             try {
-                $proc = Start-Process -FilePath $dest -PassThru
-                Set-WinUtilProcessForeground -Process $proc
+                if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest)) {
+                    $proc = Start-Process -FilePath $dest -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                }
             } catch {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to launch uninstaller for ${name}: $_"
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue

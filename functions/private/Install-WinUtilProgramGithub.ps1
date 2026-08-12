@@ -3,6 +3,10 @@ Function Install-WinUtilProgramGithub {
     .SYNOPSIS
         Downloads and runs the newest matching release asset from a GitHub repo - for
         Channels DVR community projects not published to winget/choco.
+
+    .DESCRIPTION
+        De-elevated the same way, and for the same reason, as Install-WinUtilProgramDirect -
+        see that function's own docstring.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -60,18 +64,22 @@ Function Install-WinUtilProgramGithub {
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
         try {
             if ($dest -like "*.msi") {
-                Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$dest`"" -Wait
+                Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`"") | Out-Null
                 Write-WinUtilLog -Component "Package" -Message "$name installed."
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue
             } else {
                 # No known silent-install flag for these community-released installers, so this
                 # runs interactively - and some interactive installers launch a long-running
-                # application on completion that never exits, which would make -Wait block
-                # forever. Launch and move on instead of waiting; don't delete the downloaded
-                # file since the process may still be reading it after we return.
-                $proc = Start-Process -FilePath $dest -PassThru
-                Set-WinUtilProcessForeground -Process $proc
-                Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                # application on completion that never exits, which would make waiting for it
+                # block forever. Launch and move on instead of waiting; don't delete the
+                # downloaded file since the process may still be reading it after we return.
+                if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest) {
+                    Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                } else {
+                    $proc = Start-Process -FilePath $dest -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                    Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                }
             }
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run installer for ${name}: $_"
