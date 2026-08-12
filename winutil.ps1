@@ -14965,11 +14965,28 @@ for ($row = 0; $row -lt $channelsLogoBarRows; $row++) {
 }
 Write-Host ($channelsLogoLeftMargin + "|" + (" " * $channelsLogoInnerWidth) + "|") -ForegroundColor White
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor White
-Write-Host ""
-Write-Host "======CDVR WinUtil========"
-Write-Host "=Channels DVR Installer==="
-Write-Host "(fork of ChrisTitusTech/winutil)"
 
+# Title/subtitle block, framed to the exact same width as the logo above it so the two read
+# as one unit (like a TV on a stand) instead of a logo followed by unrelated plain text.
+function Write-WinUtilBannerLine {
+    param([string]$Text, [string]$TextColor = 'White')
+    $innerWidth = $channelsLogoInnerWidth
+    if ($Text.Length -gt $innerWidth) { $Text = $Text.Substring(0, $innerWidth) }
+    $padLeft = [math]::Floor(($innerWidth - $Text.Length) / 2)
+    $padRight = $innerWidth - $Text.Length - $padLeft
+    Write-Host ($channelsLogoLeftMargin + "|") -NoNewline -ForegroundColor DarkGray
+    Write-Host ((" " * $padLeft) + $Text + (" " * $padRight)) -NoNewline -ForegroundColor $TextColor
+    Write-Host "|" -ForegroundColor DarkGray
+}
+
+Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor DarkGray
+Write-WinUtilBannerLine -Text "CDVR WinUtil v$($sync.version)" -TextColor Cyan
+Write-WinUtilBannerLine -Text "Channels DVR Installer" -TextColor White
+Write-WinUtilBannerLine -Text "fork of ChrisTitusTech/winutil" -TextColor DarkGray
+Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor DarkGray
+Write-Host ""
+
+Remove-Item -Path Function:\Write-WinUtilBannerLine -ErrorAction SilentlyContinue
 Remove-Variable -Name channelsLogo* -ErrorAction SilentlyContinue
 
 # Load the configuration files
