@@ -26,6 +26,16 @@ Function Install-WinUtilProgramNpm {
         not a blanket "allow everything" flag for every npm-type install - that would defeat the
         point of npm's own default-deny protection against arbitrary install-time code execution
         for every OTHER npm-type package, most of which have no declared need for it.
+
+        preUninstallCommand (catalog field, optional) runs before "npm uninstall", the mirror of
+        postInstallCommand running after "npm install" - added for Prismcast specifically, whose
+        "prismcast service install" postInstallCommand registers and starts a real background
+        Windows service. Confirmed live: uninstalling without stopping that service first fails
+        with npm error EBUSY ("resource busy or locked") trying to rename/delete the package
+        folder out from under the still-running process holding its files open. Best-effort, not
+        gating: a failure here is logged but doesn't abort the npm uninstall attempt itself,
+        since npm's own EBUSY failure is still a clear, actionable signal on its own if this step
+        didn't fully resolve the lock for some other reason.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -53,6 +63,16 @@ Function Install-WinUtilProgramNpm {
         if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "npm is not on PATH - can't $($Action.ToLower()) $name."
             continue
+        }
+
+        if ($Action -eq "Uninstall" -and -not [string]::IsNullOrWhiteSpace($package.preUninstallCommand)) {
+            Write-WinUtilLog -Component "Package" -Message "Running pre-uninstall step for $name`: $($package.preUninstallCommand)"
+            try {
+                & ([scriptblock]::Create($package.preUninstallCommand))
+                Write-WinUtilLog -Component "Package" -Message "$name pre-uninstall step completed"
+            } catch {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Pre-uninstall step failed for ${name}: $_"
+            }
         }
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }

@@ -63,6 +63,30 @@ BeforeAll {
         param($Control)
         $Control.RaiseEvent((New-Object Windows.Input.MouseEventArgs([Windows.Input.Mouse]::PrimaryDevice, 0) -Property @{ RoutedEvent = [Windows.UIElement]::MouseEnterEvent }))
     }
+
+    function script:Send-WinUtilMouseLeave {
+        param($Control)
+        $Control.RaiseEvent((New-Object Windows.Input.MouseEventArgs([Windows.Input.Mouse]::PrimaryDevice, 0) -Property @{ RoutedEvent = [Windows.UIElement]::MouseLeaveEvent }))
+    }
+
+    # DispatcherTimers (including $sync.appPopupCloseTimer) only tick while the Dispatcher is
+    # actually pumping messages - normally the WPF message loop, which these tests never start
+    # (no ShowDialog()/Run() here, unlike custom-dialog.Tests.ps1). Pushing a nested frame with
+    # its own short-lived timer is the standard way to let queued Dispatcher work (including
+    # OTHER timers) run for a bounded real-time window without a full modal loop.
+    function script:Wait-WinUtilDispatcher {
+        param([int]$Milliseconds)
+
+        $frame = New-Object Windows.Threading.DispatcherFrame
+        $waitTimer = New-Object Windows.Threading.DispatcherTimer
+        $waitTimer.Interval = [TimeSpan]::FromMilliseconds($Milliseconds)
+        $waitTimer.Add_Tick({
+            $waitTimer.Stop()
+            $frame.Continue = $false
+        })
+        $waitTimer.Start()
+        [Windows.Threading.Dispatcher]::PushFrame($frame)
+    }
 }
 
 Describe "App popup layout" {
@@ -110,5 +134,50 @@ Describe "App popup Open2 (secondary launch target)" {
 
         $sync.appPopupOpen2Button.Tag | Should -Be "shell:AppsFolder\MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe!App"
         $sync.appPopupOpen2Button.ToolTip | Should -Match "WSL Settings"
+    }
+}
+
+Describe "App popup close grace period" {
+    BeforeEach {
+        $sync.appPopupCloseTimer.Stop()
+        $sync.appPopup.IsOpen = $true
+    }
+
+    It "closes the popup after the grace period when the mouse doesn't come back" {
+        Send-WinUtilMouseLeave -Control $sync.appPopup.Child
+
+        $sync.appPopup.IsOpen | Should -BeTrue
+        Wait-WinUtilDispatcher -Milliseconds 600
+
+        $sync.appPopup.IsOpen | Should -BeFalse
+    }
+
+    It "cancels the pending close if the mouse re-enters before the grace period elapses" {
+        # Regression guard for the actual reported bug: an earlier fix (an explicit Background
+        # on the button row, so gaps between icons are hit-testable) was real but not the whole
+        # story - small icons in a thin row, and a tooltip that renders as its own separate
+        # floating window rather than part of this row's hit-test area, both make it easy for
+        # imprecise mouse movement toward the next icon to dip outside the row for an instant.
+        # An instant close on any MouseLeave made that unrecoverable; this grace period doesn't.
+        Send-WinUtilMouseLeave -Control $sync.appPopup.Child
+        Send-WinUtilMouseEnter -Control $sync.appPopup.Child
+        Wait-WinUtilDispatcher -Milliseconds 600
+
+        $sync.appPopup.IsOpen | Should -BeTrue
+    }
+
+    It "cancels a stale pending close when the popup is reopened for a different app" {
+        # Regression guard for a bug this fix could otherwise introduce: right-clicking a
+        # second app while the first popup's close timer is still counting down must not let
+        # that stale timer close the NEWLY reopened popup a moment later. Mirrors exactly what
+        # Initialize-InstallAppEntry.ps1's own MouseRightButtonUp handler does on open.
+        Send-WinUtilMouseLeave -Control $sync.appPopup.Child
+
+        $sync.appPopupCloseTimer.Stop()
+        $sync.appPopup.IsOpen = $true
+
+        Wait-WinUtilDispatcher -Milliseconds 600
+
+        $sync.appPopup.IsOpen | Should -BeTrue
     }
 }

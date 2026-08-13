@@ -9,7 +9,12 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilProgramNpm.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilNpmPackageInstalled.ps1")
 
-    function Write-WinUtilLog { }
+    # Must declare its parameters (not just take $args implicitly) - Pester's Mock generates
+    # its proxy from THIS stub's own signature, since Write-WinUtilLog isn't a real cmdlet, and
+    # a parameterless stub gives Should -Invoke -ParameterFilter nothing to bind $Level/$Message
+    # against when re-evaluating recorded calls (confirmed live: the filter ran "without any
+    # context" and every call looked like a non-match, even ones that clearly weren't).
+    function Write-WinUtilLog { param($Message, $Level, $Component) }
 }
 
 Describe "Update-WinUtilSessionPath" {
@@ -98,6 +103,75 @@ Describe "Install-WinUtilProgramNpm --allow-scripts" {
 
         Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
             (@($ArgumentList) -join "|") -eq "/c|npm|uninstall|-g|prismcast"
+        }
+    }
+}
+
+Describe "Install-WinUtilProgramNpm preUninstallCommand" {
+    BeforeEach {
+        Mock Write-WinUtilLog { }
+        Mock Update-WinUtilSessionPath { }
+        Mock Get-Command { [pscustomobject]@{ Name = "npm" } } -ParameterFilter { $Name -eq "npm" }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+    }
+
+    It "runs preUninstallCommand before the npm uninstall itself, for a package that declares one" {
+        # Regression guard for the actual reported bug: uninstalling Prismcast failed with npm
+        # error EBUSY ("resource busy or locked") trying to rename/delete its package folder,
+        # because the background Windows service it registers at install time
+        # ("prismcast service install") was still running and holding those files open. Running
+        # "prismcast service uninstall" first (mirroring postInstallCommand's own "run something
+        # after npm install" shape, just before "npm uninstall" instead) stops and removes that
+        # service so npm's own file operations aren't fighting a live process for the same files.
+        Remove-Variable -Name preUninstallRanBeforeNpm -Scope Script -ErrorAction SilentlyContinue
+        Mock Start-Process {
+            $script:preUninstallRanBeforeNpm = $script:preUninstallRan -eq $true
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+        $pkg = [pscustomobject]@{
+            content = "Prismcast"; npmPackage = "prismcast"
+            preUninstallCommand = 'Set-Variable -Name preUninstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg)
+
+        $script:preUninstallRan | Should -BeTrue
+        $script:preUninstallRanBeforeNpm | Should -BeTrue
+        Remove-Variable -Name preUninstallRan -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name preUninstallRanBeforeNpm -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "does not run preUninstallCommand on install, even when the package declares one" {
+        Remove-Variable -Name preUninstallRan -Scope Script -ErrorAction SilentlyContinue
+        $pkg = [pscustomobject]@{
+            content = "Prismcast"; npmPackage = "prismcast"
+            preUninstallCommand = 'Set-Variable -Name preUninstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
+
+        $script:preUninstallRan | Should -BeNullOrEmpty
+    }
+
+    It "does not require a preUninstallCommand" {
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
+
+        { Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg) } | Should -Not -Throw
+    }
+
+    It "still attempts the npm uninstall even when preUninstallCommand itself fails" {
+        $pkg = [pscustomobject]@{
+            content = "Prismcast"; npmPackage = "prismcast"
+            preUninstallCommand = 'throw "boom"'
+        }
+
+        Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg)
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            (@($ArgumentList) -join "|") -eq "/c|npm|uninstall|-g|prismcast"
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "Pre-uninstall step failed for Prismcast*"
         }
     }
 }

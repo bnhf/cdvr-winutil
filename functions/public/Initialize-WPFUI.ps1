@@ -61,12 +61,33 @@ function Initialize-WPFUI {
             # created by each button's own margin (AppEntryMargin) - to count as "inside" the
             # panel for mouse hit-testing. WPF panels with no Background at all are hit-test
             # transparent in any unpainted area, so without this, MouseLeave fired (closing the
-            # whole popup) the instant the mouse crossed from one icon toward the next, before
-            # its tooltip had a chance to show - confirmed live, this made it impossible to read
-            # more than one icon's tooltip per right-click.
+            # whole popup) the instant the mouse crossed from one icon toward the next.
             $appPopupStackPanel.Background = [Windows.Media.Brushes]::Transparent
-            $appPopupStackPanel.Add_MouseLeave({
+
+            # Closing is delayed, not instant, on MouseLeave - confirmed live, the Background
+            # fix above (a real, separate bug) wasn't the whole story: these are small icons in
+            # a thin row, and naturally imprecise mouse movement toward the next one (or toward
+            # reading its tooltip's own text, which renders as a separate floating window, not
+            # part of this panel's own hit-test area at all) can still legitimately dip outside
+            # the row for an instant. A short grace period - cancelled if the mouse comes back
+            # before it elapses - is the same "hover intent" pattern used by virtually every
+            # flyout/submenu that has to tolerate imprecise mouse paths between its own items.
+            # Stored on $sync (matching $sync.appPopup itself) so the right-click handler that
+            # (re)opens this popup - Initialize-InstallAppEntry.ps1 - can cancel a stale pending
+            # close: right-clicking a second app within the grace period of the first popup
+            # closing would otherwise leave this timer still counting down toward closing the
+            # NEWLY reopened popup a moment after it appears.
+            $sync.appPopupCloseTimer = New-Object Windows.Threading.DispatcherTimer
+            $sync.appPopupCloseTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+            $sync.appPopupCloseTimer.Add_Tick({
+                $sync.appPopupCloseTimer.Stop()
                 $sync.appPopup.IsOpen = $false
+            })
+            $appPopupStackPanel.Add_MouseLeave({
+                $sync.appPopupCloseTimer.Start()
+            })
+            $appPopupStackPanel.Add_MouseEnter({
+                $sync.appPopupCloseTimer.Stop()
             })
             $appPopup.Child = $appPopupStackPanel
 

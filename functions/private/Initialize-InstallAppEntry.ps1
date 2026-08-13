@@ -51,6 +51,13 @@ function Initialize-InstallAppEntry {
                     [Windows.Visibility]::Collapsed
                 }
             }
+            # Cancel a stale pending close from a previous popup interaction (see the timer's
+            # own comment in Initialize-WPFUI.ps1) - without this, right-clicking a second app
+            # within the first popup's own close grace period could leave this timer counting
+            # down toward closing the one that's opening right now instead.
+            if ($sync.appPopupCloseTimer) {
+                $sync.appPopupCloseTimer.Stop()
+            }
             # Set the popup position to the current mouse position
             $sync.appPopup.PlacementTarget = $this
             $sync.appPopup.IsOpen = $true

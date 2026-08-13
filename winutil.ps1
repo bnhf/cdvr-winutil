@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1601
+    Version        : v2026.08.13.1624
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1601"
+$sync.version = "v2026.08.13.1624"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -1213,6 +1213,13 @@ function Initialize-InstallAppEntry {
                     [Windows.Visibility]::Collapsed
                 }
             }
+            # Cancel a stale pending close from a previous popup interaction (see the timer's
+            # own comment in Initialize-WPFUI.ps1) - without this, right-clicking a second app
+            # within the first popup's own close grace period could leave this timer counting
+            # down toward closing the one that's opening right now instead.
+            if ($sync.appPopupCloseTimer) {
+                $sync.appPopupCloseTimer.Stop()
+            }
             # Set the popup position to the current mouse position
             $sync.appPopup.PlacementTarget = $this
             $sync.appPopup.IsOpen = $true
@@ -2155,6 +2162,16 @@ Function Install-WinUtilProgramNpm {
         not a blanket "allow everything" flag for every npm-type install - that would defeat the
         point of npm's own default-deny protection against arbitrary install-time code execution
         for every OTHER npm-type package, most of which have no declared need for it.
+
+        preUninstallCommand (catalog field, optional) runs before "npm uninstall", the mirror of
+        postInstallCommand running after "npm install" - added for Prismcast specifically, whose
+        "prismcast service install" postInstallCommand registers and starts a real background
+        Windows service. Confirmed live: uninstalling without stopping that service first fails
+        with npm error EBUSY ("resource busy or locked") trying to rename/delete the package
+        folder out from under the still-running process holding its files open. Best-effort, not
+        gating: a failure here is logged but doesn't abort the npm uninstall attempt itself,
+        since npm's own EBUSY failure is still a clear, actionable signal on its own if this step
+        didn't fully resolve the lock for some other reason.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -2182,6 +2199,16 @@ Function Install-WinUtilProgramNpm {
         if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "npm is not on PATH - can't $($Action.ToLower()) $name."
             continue
+        }
+
+        if ($Action -eq "Uninstall" -and -not [string]::IsNullOrWhiteSpace($package.preUninstallCommand)) {
+            Write-WinUtilLog -Component "Package" -Message "Running pre-uninstall step for $name`: $($package.preUninstallCommand)"
+            try {
+                & ([scriptblock]::Create($package.preUninstallCommand))
+                Write-WinUtilLog -Component "Package" -Message "$name pre-uninstall step completed"
+            } catch {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Pre-uninstall step failed for ${name}: $_"
+            }
         }
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
@@ -8377,12 +8404,33 @@ function Initialize-WPFUI {
             # created by each button's own margin (AppEntryMargin) - to count as "inside" the
             # panel for mouse hit-testing. WPF panels with no Background at all are hit-test
             # transparent in any unpainted area, so without this, MouseLeave fired (closing the
-            # whole popup) the instant the mouse crossed from one icon toward the next, before
-            # its tooltip had a chance to show - confirmed live, this made it impossible to read
-            # more than one icon's tooltip per right-click.
+            # whole popup) the instant the mouse crossed from one icon toward the next.
             $appPopupStackPanel.Background = [Windows.Media.Brushes]::Transparent
-            $appPopupStackPanel.Add_MouseLeave({
+
+            # Closing is delayed, not instant, on MouseLeave - confirmed live, the Background
+            # fix above (a real, separate bug) wasn't the whole story: these are small icons in
+            # a thin row, and naturally imprecise mouse movement toward the next one (or toward
+            # reading its tooltip's own text, which renders as a separate floating window, not
+            # part of this panel's own hit-test area at all) can still legitimately dip outside
+            # the row for an instant. A short grace period - cancelled if the mouse comes back
+            # before it elapses - is the same "hover intent" pattern used by virtually every
+            # flyout/submenu that has to tolerate imprecise mouse paths between its own items.
+            # Stored on $sync (matching $sync.appPopup itself) so the right-click handler that
+            # (re)opens this popup - Initialize-InstallAppEntry.ps1 - can cancel a stale pending
+            # close: right-clicking a second app within the grace period of the first popup
+            # closing would otherwise leave this timer still counting down toward closing the
+            # NEWLY reopened popup a moment after it appears.
+            $sync.appPopupCloseTimer = New-Object Windows.Threading.DispatcherTimer
+            $sync.appPopupCloseTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+            $sync.appPopupCloseTimer.Add_Tick({
+                $sync.appPopupCloseTimer.Stop()
                 $sync.appPopup.IsOpen = $false
+            })
+            $appPopupStackPanel.Add_MouseLeave({
+                $sync.appPopupCloseTimer.Start()
+            })
+            $appPopupStackPanel.Add_MouseEnter({
+                $sync.appPopupCloseTimer.Stop()
             })
             $appPopup.Child = $appPopupStackPanel
 
@@ -11623,6 +11671,7 @@ $sync.configs.applications = @'
     "npmPackage": "prismcast",
     "npmAllowScripts": "ffmpeg-for-homebridge",
     "postInstallCommand": "prismcast service install",
+    "preUninstallCommand": "prismcast service uninstall",
     "requires": [
       "nodejs",
       "chrome"

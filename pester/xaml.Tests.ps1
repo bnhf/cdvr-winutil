@@ -445,6 +445,7 @@ Describe "XAML and sync wiring" {
             "appPopup",
             "appPopupSelectedApp",
             "appPopupOpen2Button",
+            "appPopupCloseTimer",
             "ItemsControl",
             "ImportInProgress",
             "ScriptsInstallPrograms",

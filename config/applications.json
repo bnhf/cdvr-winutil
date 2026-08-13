@@ -263,6 +263,7 @@
         "npmPackage": "prismcast",
         "npmAllowScripts": "ffmpeg-for-homebridge",
         "postInstallCommand": "prismcast service install",
+        "preUninstallCommand": "prismcast service uninstall",
         "requires": ["nodejs", "chrome"],
         "foss": true
     }
