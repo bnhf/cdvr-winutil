@@ -177,6 +177,67 @@ Describe "Install-WinUtilProgramNpm preUninstallCommand" {
     }
 }
 
+Describe "Install-WinUtilProgramNpm process cleanup before uninstall" {
+    BeforeEach {
+        Mock Write-WinUtilLog { }
+        Mock Update-WinUtilSessionPath { }
+        Mock Get-Command { [pscustomobject]@{ Name = "npm" } } -ParameterFilter { $Name -eq "npm" }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Start-Sleep { }
+        Mock Get-CimInstance { }
+        Mock Stop-Process { }
+    }
+
+    It "stops a node.exe process whose command line references this package's own files" {
+        # Regression guard for the actual reported bug, across three separate live rounds:
+        # Prismcast's own declared shutdown command ("prismcast service stop") reported success
+        # but npm's uninstall still failed with EBUSY afterward regardless - reading Prismcast's
+        # own source explained the FIRST failure (a missing "service stop" call), but even
+        # fixing that didn't resolve it, meaning the package's own shutdown path can't be
+        # trusted to have actually released its files. This finds and stops the real culprit
+        # directly, independent of whatever the package's own preUninstallCommand did or didn't
+        # accomplish.
+        Mock Get-CimInstance {
+            @(
+                [pscustomobject]@{ ProcessId = 4242; CommandLine = 'node.exe "C:\Users\slayer\AppData\Roaming\npm\node_modules\prismcast\dist\index.js"' }
+                [pscustomobject]@{ ProcessId = 9999; CommandLine = 'node.exe "C:\some\other\node_modules\unrelated-tool\index.js"' }
+            )
+        } -ParameterFilter { $ClassName -eq "Win32_Process" -and $Filter -eq "Name='node.exe'" }
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
+
+        Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg)
+
+        Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
+        Should -Invoke -CommandName Stop-Process -Times 0 -Exactly -ParameterFilter { $Id -eq 9999 }
+    }
+
+    It "runs the cleanup even when the package has no preUninstallCommand declared" {
+        Mock Get-CimInstance {
+            [pscustomobject]@{ ProcessId = 4242; CommandLine = 'node.exe ".../node_modules/prismcast/dist/index.js"' }
+        } -ParameterFilter { $ClassName -eq "Win32_Process" -and $Filter -eq "Name='node.exe'" }
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
+
+        Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg)
+
+        Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
+    }
+
+    It "does not run the cleanup (or stop anything) on install" {
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
+
+        Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
+
+        Should -Invoke -CommandName Get-CimInstance -Times 0 -Exactly
+        Should -Invoke -CommandName Stop-Process -Times 0 -Exactly
+    }
+
+    It "does not throw or stop anything when no matching process is found" {
+        { Install-WinUtilProgramNpm -Action Uninstall -Packages @([pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }) } | Should -Not -Throw
+
+        Should -Invoke -CommandName Stop-Process -Times 0 -Exactly
+    }
+}
+
 Describe "Test-WinUtilNpmPackageInstalled PATH refresh" {
     It "refreshes PATH unconditionally before checking whether npm is available" {
         # Same wiring as Install-WinUtilProgramNpm above - "Show Installed Apps" can run in the

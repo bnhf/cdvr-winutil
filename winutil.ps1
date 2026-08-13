@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1635
+    Version        : v2026.08.13.1643
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1635"
+$sync.version = "v2026.08.13.1643"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2166,20 +2166,29 @@ Function Install-WinUtilProgramNpm {
         preUninstallCommand (catalog field, optional) runs before "npm uninstall", the mirror of
         postInstallCommand running after "npm install" - added for Prismcast specifically, whose
         "prismcast service install" postInstallCommand registers a Task Scheduler-based
-        background service that keeps a node.exe process running. Confirmed live over two
-        rounds: the first attempt used "prismcast service uninstall" alone, which still failed
-        with npm error EBUSY ("resource busy or locked") trying to rename/delete the package
-        folder - reading Prismcast's own source (its Windows service generator) showed why:
-        "service uninstall" only deregisters the scheduled task definition, it never calls
-        "service stop" (the one that actually runs Stop-ScheduledTask and terminates the running
-        process) - so the process kept running, orphaned from Task Scheduler but still very much
-        alive and holding its files open, no matter how long the catalog waited afterward. The
-        catalog value runs "service stop" first, then "service uninstall" to also clean up the
-        task registration, then a short pause for the OS to finish releasing the just-closed
-        process's file handles. Best-effort, not gating: a failure here is logged but doesn't
-        abort the npm uninstall attempt itself, since npm's own EBUSY failure is still a clear,
-        actionable signal on its own if this step didn't fully resolve the lock for some other
-        reason.
+        background service that keeps a node.exe process running. A package's own declared
+        shutdown command is a best-effort courtesy, not the actual guarantee that unblocks npm -
+        see the CIM-based kill below for that.
+
+        Every Uninstall also directly finds and force-stops any node.exe process still running
+        THIS package's own files, independent of - and after - preUninstallCommand, rather than
+        trusting a package's own shutdown mechanism to have actually released them. Confirmed
+        live for Prismcast across three rounds: "prismcast service uninstall" alone didn't stop
+        it; reading Prismcast's own source showed why ("service uninstall" only deregisters the
+        scheduled task, it never calls "service stop", the one that actually runs
+        Stop-ScheduledTask) and its declared preUninstallCommand was fixed to call "service stop"
+        directly - but npm's own uninstall still failed with EBUSY afterward regardless, meaning
+        even Stop-ScheduledTask terminating the Task Scheduler-launched PowerShell launcher
+        process doesn't reliably cascade to the node.exe it spawned as its own child via
+        Start-Process (a real, if opaque, gap in how Windows Job Object termination propagates
+        through nested Start-Process launches - not something any amount of extra waiting fixes,
+        since the process was never actually dying in the first place). Matched by command line,
+        not by image name ("node.exe" alone would kill every unrelated Node process on the
+        system) - requiring both "node_modules" and the exact package name to appear together is
+        specific enough that only a process actually running THIS package's own entry point
+        matches. This is deliberately unconditional (not gated on preUninstallCommand being
+        declared), since any npm-type package that keeps a background process running - now or
+        in the future - can hit the exact same EBUSY problem, not just Prismcast.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -2209,14 +2218,28 @@ Function Install-WinUtilProgramNpm {
             continue
         }
 
-        if ($Action -eq "Uninstall" -and -not [string]::IsNullOrWhiteSpace($package.preUninstallCommand)) {
-            Write-WinUtilLog -Component "Package" -Message "Running pre-uninstall step for $name`: $($package.preUninstallCommand)"
-            try {
-                & ([scriptblock]::Create($package.preUninstallCommand))
-                Write-WinUtilLog -Component "Package" -Message "$name pre-uninstall step completed"
-            } catch {
-                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Pre-uninstall step failed for ${name}: $_"
+        if ($Action -eq "Uninstall") {
+            if (-not [string]::IsNullOrWhiteSpace($package.preUninstallCommand)) {
+                Write-WinUtilLog -Component "Package" -Message "Running pre-uninstall step for $name`: $($package.preUninstallCommand)"
+                try {
+                    & ([scriptblock]::Create($package.preUninstallCommand))
+                    Write-WinUtilLog -Component "Package" -Message "$name pre-uninstall step completed"
+                } catch {
+                    Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Pre-uninstall step failed for ${name}: $_"
+                }
             }
+
+            try {
+                $lockingProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CommandLine -like "*node_modules*$npmPackage*" })
+                foreach ($lockingProcess in $lockingProcesses) {
+                    Write-WinUtilLog -Component "Package" -Message "Stopping node.exe (PID $($lockingProcess.ProcessId)) still running $name before uninstall"
+                    Stop-Process -Id $lockingProcess.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+                if ($lockingProcesses.Count -gt 0) {
+                    Start-Sleep -Milliseconds 500
+                }
+            } catch {}
         }
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
