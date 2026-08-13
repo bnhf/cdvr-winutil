@@ -38,6 +38,19 @@ function Initialize-InstallAppEntry {
         $border.Add_MouseRightButtonUp({
             # Store the selected app in a global variable so it can be used in the popup
             $sync.appPopupSelectedApp = $this.Tag
+            # The "Open2" icon (a second launch target - e.g. Olivetin's bundled Portainer, or
+            # WSL2's own Settings GUI) only exists for the couple of apps that declare
+            # "secondaryOpen" - collapsed here rather than left to show a do-nothing icon for
+            # every other app. Decided once, per app, right here (not per-hover on the button
+            # itself), so the popup's own width is already correct the moment it opens.
+            if ($sync.appPopupOpen2Button) {
+                $appObject = $sync.configs.applicationsHashtable.$($this.Tag)
+                $sync.appPopupOpen2Button.Visibility = if ($appObject.secondaryOpen) {
+                    [Windows.Visibility]::Visible
+                } else {
+                    [Windows.Visibility]::Collapsed
+                }
+            }
             # Set the popup position to the current mouse position
             $sync.appPopup.PlacementTarget = $this
             $sync.appPopup.IsOpen = $true

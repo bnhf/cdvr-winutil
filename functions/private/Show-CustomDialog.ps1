@@ -253,15 +253,19 @@ function Show-CustomDialog {
         $lastPos = $match.Index + $match.Length
     }
 
-    # Add any remaining text after the last hyperlink
-    if ($lastPos -lt $Message.Length) {
+    # Pre-existing bug, confirmed live: a message with NO hyperlinks at all left $lastPos at its
+    # initial 0, so "add remaining text after the last hyperlink" (0 < Message.Length, true) AND
+    # "no matches, add the entire message" (also true) BOTH fired, adding the whole message to
+    # Inlines twice - invisible for every earlier caller (About/Sponsors), which always included
+    # at least one hyperlink, so the "no matches" branch never ran for them. These need to be
+    # mutually exclusive, not two independent ifs.
+    if ($regex.Matches($Message).Count -eq 0) {
+        # No hyperlinks at all - add the entire message as plain text, once.
+        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($Message))) | Out-Null
+    } elseif ($lastPos -lt $Message.Length) {
+        # Trailing text after the last hyperlink match, if any.
         $textAfter = $Message.Substring($lastPos)
         $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($textAfter))) | Out-Null
-    }
-
-    # If no matches, add the entire message as a run
-    if ($regex.Matches($Message).Count -eq 0) {
-        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($Message))) | Out-Null
     }
 
     # Content panel: the message text block, plus (when supplied) a clean Name/Description list

@@ -113,21 +113,14 @@ Function Install-WinUtilProgramGithub {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
                 # Stop a previous run of this exact install first, so a reinstall/update isn't
-                # blocked by the old file being locked open. Via taskkill /IM /T, not Get-Process/
-                # Stop-Process - two PowerShell-side matching approaches (Path alone, then
-                # Path-or-Name) were both confirmed live to still miss Pluto for Channels' actual
-                # running process (a large single-file bundle, the standard shape for a
-                # PyInstaller "onefile" build). Get-Process's Path/Name properties both depend on
-                # reading another process's MainModule info, which can silently fail across the
-                # integrity-level boundary between WinUtil's own elevated process and this app's
-                # de-elevated one. taskkill operates purely on the OS process table by image name
-                # (which the catalog's own assetPattern already provides, wildcard and all) and
-                # terminates synchronously, without needing to read the target's module info at
-                # all - the same tool Streaming Library Manager's own upstream install script
-                # already relies on for this exact purpose. /T also terminates any child
-                # processes, covering a self-extracted app that re-execs as one.
+                # blocked by the old file being locked open, via Stop-WinUtilProcessByAssetPattern
+                # - see that function's own docstring for the full history of why (two
+                # PowerShell-side Get-Process approaches, then a first taskkill /IM attempt, were
+                # all confirmed live to still silently miss Pluto for Channels' actual running
+                # process before the real cause was pinned down: /IM doesn't actually support
+                # wildcards at all, contrary to how it's often described).
                 if ($assetPattern) {
-                    & taskkill /F /IM $assetPattern /T 2>$null | Out-Null
+                    Stop-WinUtilProcessByAssetPattern -AssetPattern $assetPattern
                     # A brief fixed pause, not a poll - taskkill's own termination is synchronous,
                     # but the OS can lag slightly releasing a just-killed process's file handles.
                     Start-Sleep -Milliseconds 500

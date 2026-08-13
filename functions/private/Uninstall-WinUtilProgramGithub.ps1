@@ -31,27 +31,16 @@ Function Uninstall-WinUtilProgramGithub {
         uninstalling one is the same "stop the process, delete the folder" approach
         Uninstall-WinUtilStreamLinkManager already uses for the same reason.
 
-        Stopping the running instance uses taskkill /IM /T, not Get-Process/Stop-Process - two
-        PowerShell-side approaches (Path-matching alone, then Path-or-Name-matching) were both
-        confirmed live to still miss Pluto for Channels' actual running process (a large
-        single-file bundle, the standard shape for a PyInstaller "onefile" build): Remove-Item
-        would then hit that still-open file and fail to fully delete the folder, but that
-        failure is a non-terminating per-item error Remove-Item doesn't throw as a catchable
-        exception, so the WARN-on-incomplete-deletion check below (this function's other fix)
-        correctly reported it as incomplete rather than lying about success - the deletion
-        really was incomplete, just for a reason still tracing back to the same "can't reliably
-        find the running process from here" root cause. Get-Process's Path/Name properties both
-        depend on reading another process's MainModule info, which is exactly the kind of thing
-        that can silently fail across the integrity-level boundary between WinUtil's own
-        elevated process and this app's de-elevated one (swallowed by this code's own try/catch
-        around that read, by design, so a permissions quirk wouldn't crash the whole uninstall -
-        but that same swallowing is invisible when it's the actual cause of a miss). taskkill
-        operates purely on the OS process table by image name (which the catalog's own
-        assetPattern already provides, wildcard and all - no derivation needed) and terminates
-        synchronously, without needing to read the target process's module info at all - the
-        same tool Streaming Library Manager's own upstream install script already relies on for
-        this exact purpose. /T also terminates any child processes, covering a self-extracted
-        app that re-execs as one.
+        Stopping the running instance is Stop-WinUtilProcessByAssetPattern's job (taskkill's
+        /FI IMAGENAME filter, not /IM directly, and not Get-Process/Stop-Process) - see that
+        function's own docstring for the full history of why: two PowerShell-side Get-Process
+        approaches, then a first taskkill /IM attempt, were all confirmed live to still silently
+        fail to stop Pluto for Channels' actual running process. Remove-Item then hit that
+        still-open file and failed to fully delete the folder, but that failure is a
+        non-terminating per-item error Remove-Item doesn't throw as a catchable exception, so
+        the WARN-on-incomplete-deletion check below (this function's other fix) correctly
+        reported it as incomplete rather than lying about success - the deletion really was
+        incomplete, just for a root cause that took several rounds to actually pin down.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -83,7 +72,7 @@ Function Uninstall-WinUtilProgramGithub {
                 # is still worth it, simpler than polling for something taskkill itself doesn't
                 # give us a handle to poll.
                 if ($package.assetPattern) {
-                    & taskkill /F /IM $package.assetPattern /T 2>$null | Out-Null
+                    Stop-WinUtilProcessByAssetPattern -AssetPattern $package.assetPattern
                     Start-Sleep -Milliseconds 500
                 }
 

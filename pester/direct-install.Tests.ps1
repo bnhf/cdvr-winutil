@@ -9,6 +9,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilProgramDirect.ps1")
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilProgramGithub.ps1")
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPortableGithubInstallDir.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Stop-WinUtilProcessByAssetPattern.ps1")
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
     function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec) }
@@ -203,8 +204,7 @@ Describe "Install-WinUtilProgramGithub" {
         Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
         Mock New-Item { }
         Mock Move-Item { }
-        function taskkill { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
-        Mock taskkill { }
+        Mock Stop-WinUtilProcessByAssetPattern { }
         Mock Start-Sleep { }
     }
 
@@ -318,19 +318,16 @@ Describe "Install-WinUtilProgramGithub" {
         }
 
         It "stops a previous run of the app before overwriting its files, so a reinstall isn't blocked by a file lock" {
-            # Regression guard: two earlier PowerShell-side approaches to finding the running
-            # process (Get-Process matched by install-folder Path alone, then by Path-or-Name)
-            # were both confirmed live to still miss Pluto for Channels' actual running process
-            # (a large single-file bundle, the standard shape for a PyInstaller "onefile"
-            # build) - taskkill's own image-name matching (via the catalog's assetPattern, which
-            # is already in the wildcard shape taskkill /IM expects) doesn't depend on reading
-            # another process's module info the way Get-Process's Path/Name properties do.
+            # Regression guard: this delegates to Stop-WinUtilProcessByAssetPattern - see that
+            # function's own docstring for the multi-round history of why (two PowerShell-side
+            # Get-Process approaches, then a first taskkill /IM attempt, were all confirmed live
+            # to still silently miss Pluto for Channels' actual running process).
             $package = [pscustomobject]@{ content = "Pluto for Channels"; repo = "nuken/Pluto-Windows_4C"; assetPattern = "PlutoForChannels*.exe"; portable = $true }
 
             Install-WinUtilProgramGithub -Packages @($package)
 
-            Should -Invoke -CommandName taskkill -Times 1 -Exactly -ParameterFilter {
-                (@($Arguments) -join "|") -eq "/F|/IM|PlutoForChannels*.exe|/T"
+            Should -Invoke -CommandName Stop-WinUtilProcessByAssetPattern -Times 1 -Exactly -ParameterFilter {
+                $AssetPattern -eq "PlutoForChannels*.exe"
             }
         }
     }

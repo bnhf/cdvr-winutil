@@ -57,6 +57,14 @@ function Initialize-WPFUI {
 
             $appPopupStackPanel = New-Object Windows.Controls.StackPanel
             $appPopupStackPanel.Orientation = "Horizontal"
+            # An explicit (if invisible) Background is required for the gaps BETWEEN buttons -
+            # created by each button's own margin (AppEntryMargin) - to count as "inside" the
+            # panel for mouse hit-testing. WPF panels with no Background at all are hit-test
+            # transparent in any unpainted area, so without this, MouseLeave fired (closing the
+            # whole popup) the instant the mouse crossed from one icon toward the next, before
+            # its tooltip had a chance to show - confirmed live, this made it impossible to read
+            # more than one icon's tooltip per right-click.
+            $appPopupStackPanel.Background = [Windows.Media.Brushes]::Transparent
             $appPopupStackPanel.Add_MouseLeave({
                 $sync.appPopup.IsOpen = $false
             })
@@ -66,7 +74,8 @@ function Initialize-WPFUI {
             [PSCustomObject]@{ Name = "Install";    Icon = [char]0xE118 },
             [PSCustomObject]@{ Name = "Uninstall";  Icon = [char]0xE74D },
             [PSCustomObject]@{ Name = "Info";       Icon = [char]0xE946 },
-            [PSCustomObject]@{ Name = "Open";       Icon = [char]0xE8A7 }
+            [PSCustomObject]@{ Name = "Open";       Icon = [char]0xE8A7 },
+            [PSCustomObject]@{ Name = "Open2";      Icon = [char]0xE8A7 }
             )
             foreach ($button in $appButtons) {
                 $newButton = New-Object Windows.Controls.Button
@@ -123,6 +132,40 @@ function Initialize-WPFUI {
                                     "Launch $($appObject.content)"
                                 } else {
                                     "Couldn't find a web interface or installed shortcut for $($appObject.content)"
+                                }
+                            }
+                        })
+                        $newButton.Add_Click({
+                            if ($this.Tag) {
+                                Open-WinUtilLink -Target $this.Tag
+                            }
+                        })
+                    }
+                    "Open2" {
+                        # A second, optional launch target for the handful of apps that
+                        # genuinely have two (config/applications.json "secondaryOpen") - e.g.
+                        # Olivetin EZ-Start also bundles Portainer on its own port, and WSL2 has
+                        # a native "WSL Settings" GUI app worth surfacing directly. Same shape as
+                        # "Open" (a "webui" URL or an appName resolved via
+                        # Find-WinUtilAppLaunchTarget), just a second entry rather than the
+                        # single implicit one "Open" already covers. Hidden entirely (see the
+                        # right-click handler in Initialize-InstallAppEntry.ps1, which sets this
+                        # button's Visibility per-app before the popup opens) for the vast
+                        # majority of apps that don't declare one, rather than showing a second
+                        # icon that does nothing for every other app.
+                        $sync.appPopupOpen2Button = $newButton
+                        $newButton.Add_MouseEnter({
+                            $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
+                            $secondary = $appObject.secondaryOpen
+                            if ($secondary.webui) {
+                                $this.Tag = $secondary.webui
+                                $this.ToolTip = "Open $($secondary.label)`n$($secondary.webui)"
+                            } elseif ($secondary.appName) {
+                                $this.Tag = Find-WinUtilAppLaunchTarget -AppName $secondary.appName
+                                $this.ToolTip = if ($this.Tag) {
+                                    "Launch $($secondary.label)"
+                                } else {
+                                    "Couldn't find $($secondary.label) - is it installed?"
                                 }
                             }
                         })

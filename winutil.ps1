@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1505
+    Version        : v2026.08.13.1601
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1505"
+$sync.version = "v2026.08.13.1601"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -1200,6 +1200,19 @@ function Initialize-InstallAppEntry {
         $border.Add_MouseRightButtonUp({
             # Store the selected app in a global variable so it can be used in the popup
             $sync.appPopupSelectedApp = $this.Tag
+            # The "Open2" icon (a second launch target - e.g. Olivetin's bundled Portainer, or
+            # WSL2's own Settings GUI) only exists for the couple of apps that declare
+            # "secondaryOpen" - collapsed here rather than left to show a do-nothing icon for
+            # every other app. Decided once, per app, right here (not per-hover on the button
+            # itself), so the popup's own width is already correct the moment it opens.
+            if ($sync.appPopupOpen2Button) {
+                $appObject = $sync.configs.applicationsHashtable.$($this.Tag)
+                $sync.appPopupOpen2Button.Visibility = if ($appObject.secondaryOpen) {
+                    [Windows.Visibility]::Visible
+                } else {
+                    [Windows.Visibility]::Collapsed
+                }
+            }
             # Set the popup position to the current mouse position
             $sync.appPopup.PlacementTarget = $this
             $sync.appPopup.IsOpen = $true
@@ -2049,21 +2062,14 @@ Function Install-WinUtilProgramGithub {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
                 # Stop a previous run of this exact install first, so a reinstall/update isn't
-                # blocked by the old file being locked open. Via taskkill /IM /T, not Get-Process/
-                # Stop-Process - two PowerShell-side matching approaches (Path alone, then
-                # Path-or-Name) were both confirmed live to still miss Pluto for Channels' actual
-                # running process (a large single-file bundle, the standard shape for a
-                # PyInstaller "onefile" build). Get-Process's Path/Name properties both depend on
-                # reading another process's MainModule info, which can silently fail across the
-                # integrity-level boundary between WinUtil's own elevated process and this app's
-                # de-elevated one. taskkill operates purely on the OS process table by image name
-                # (which the catalog's own assetPattern already provides, wildcard and all) and
-                # terminates synchronously, without needing to read the target's module info at
-                # all - the same tool Streaming Library Manager's own upstream install script
-                # already relies on for this exact purpose. /T also terminates any child
-                # processes, covering a self-extracted app that re-execs as one.
+                # blocked by the old file being locked open, via Stop-WinUtilProcessByAssetPattern
+                # - see that function's own docstring for the full history of why (two
+                # PowerShell-side Get-Process approaches, then a first taskkill /IM attempt, were
+                # all confirmed live to still silently miss Pluto for Channels' actual running
+                # process before the real cause was pinned down: /IM doesn't actually support
+                # wildcards at all, contrary to how it's often described).
                 if ($assetPattern) {
-                    & taskkill /F /IM $assetPattern /T 2>$null | Out-Null
+                    Stop-WinUtilProcessByAssetPattern -AssetPattern $assetPattern
                     # A brief fixed pause, not a poll - taskkill's own termination is synchronous,
                     # but the OS can lag slightly releasing a just-killed process's file handles.
                     Start-Sleep -Milliseconds 500
@@ -6600,15 +6606,19 @@ function Show-CustomDialog {
         $lastPos = $match.Index + $match.Length
     }
 
-    # Add any remaining text after the last hyperlink
-    if ($lastPos -lt $Message.Length) {
+    # Pre-existing bug, confirmed live: a message with NO hyperlinks at all left $lastPos at its
+    # initial 0, so "add remaining text after the last hyperlink" (0 < Message.Length, true) AND
+    # "no matches, add the entire message" (also true) BOTH fired, adding the whole message to
+    # Inlines twice - invisible for every earlier caller (About/Sponsors), which always included
+    # at least one hyperlink, so the "no matches" branch never ran for them. These need to be
+    # mutually exclusive, not two independent ifs.
+    if ($regex.Matches($Message).Count -eq 0) {
+        # No hyperlinks at all - add the entire message as plain text, once.
+        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($Message))) | Out-Null
+    } elseif ($lastPos -lt $Message.Length) {
+        # Trailing text after the last hyperlink match, if any.
         $textAfter = $Message.Substring($lastPos)
         $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($textAfter))) | Out-Null
-    }
-
-    # If no matches, add the entire message as a run
-    if ($regex.Matches($Message).Count -eq 0) {
-        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($Message))) | Out-Null
     }
 
     # Content panel: the message text block, plus (when supplied) a clean Name/Description list
@@ -7245,6 +7255,56 @@ function Start-WinUtilProcessAsStandardUserNoWait {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Stop-WinUtilProcessByAssetPattern {
+    <#
+    .SYNOPSIS
+        Force-stops any running process (and its child processes) whose image name matches a
+        catalog assetPattern - e.g. "PlutoForChannels*.exe" - used by portable github-install-type
+        packages before overwriting or deleting their files.
+
+    .DESCRIPTION
+        Uses taskkill's /FI IMAGENAME filter, not /IM directly, and not Get-Process/Stop-Process.
+        Both of those were tried first and both silently failed to actually find/stop Pluto for
+        Channels' running process across three separate live reports of the same underlying
+        symptom (uninstall reporting incomplete, or a reinstall failing to replace a locked
+        file) before the real cause was pinned down:
+
+        - Get-Process matched by install-folder Path, then by Path-or-Name, both missed the
+          actual running process - its Path/Name properties depend on reading another process's
+          MainModule info, which can silently fail across the integrity-level boundary between
+          WinUtil's own elevated process and this app's de-elevated one.
+        - "taskkill /F /IM PlutoForChannels*.exe" - the obvious next fix - was then confirmed
+          empirically (against a real running process, not just documentation) to not actually
+          work at all: /IM does NOT support wildcards despite being commonly described as if it
+          did. It matched nothing and killed nothing, every single time, silently reporting
+          "ERROR: The process ... not found" - explaining why the exact same symptom kept
+          resurfacing even after that "fix" shipped.
+
+        The actual working mechanism, also confirmed empirically: taskkill's /FI IMAGENAME
+        filter DOES support a wildcard, but only a single trailing one with nothing after it -
+        "IMAGENAME eq cm*" correctly matched and killed a running cmd.exe-based process, while
+        "IMAGENAME eq cm*.exe" failed outright with "ERROR: The search filter cannot be
+        recognized" (the wildcard followed by a literal suffix isn't valid filter syntax at
+        all). Catalog assetPatterns are shaped like "<Name>*.exe" - wildcard, then a literal
+        suffix - so this strips everything from the first "*" onward, KEEPING the "*", turning
+        "PlutoForChannels*.exe" into "PlutoForChannels*" before building the filter.
+
+        taskkill operates purely on the OS process table by image name and terminates
+        synchronously, without needing to read the target process's own module info at all -
+        unlike the Get-Process approaches above, nothing about it depends on the caller's and
+        target's relative integrity levels. /T also terminates any child processes.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AssetPattern
+    )
+
+    $wildcardIndex = $AssetPattern.IndexOf('*')
+    $filterPattern = if ($wildcardIndex -ge 0) { $AssetPattern.Substring(0, $wildcardIndex + 1) } else { $AssetPattern }
+
+    & taskkill /F /FI "IMAGENAME eq $filterPattern" /T 2>$null | Out-Null
 }
 
 function Test-WinUtilDockerAvailableInWSL {
@@ -7918,27 +7978,16 @@ Function Uninstall-WinUtilProgramGithub {
         uninstalling one is the same "stop the process, delete the folder" approach
         Uninstall-WinUtilStreamLinkManager already uses for the same reason.
 
-        Stopping the running instance uses taskkill /IM /T, not Get-Process/Stop-Process - two
-        PowerShell-side approaches (Path-matching alone, then Path-or-Name-matching) were both
-        confirmed live to still miss Pluto for Channels' actual running process (a large
-        single-file bundle, the standard shape for a PyInstaller "onefile" build): Remove-Item
-        would then hit that still-open file and fail to fully delete the folder, but that
-        failure is a non-terminating per-item error Remove-Item doesn't throw as a catchable
-        exception, so the WARN-on-incomplete-deletion check below (this function's other fix)
-        correctly reported it as incomplete rather than lying about success - the deletion
-        really was incomplete, just for a reason still tracing back to the same "can't reliably
-        find the running process from here" root cause. Get-Process's Path/Name properties both
-        depend on reading another process's MainModule info, which is exactly the kind of thing
-        that can silently fail across the integrity-level boundary between WinUtil's own
-        elevated process and this app's de-elevated one (swallowed by this code's own try/catch
-        around that read, by design, so a permissions quirk wouldn't crash the whole uninstall -
-        but that same swallowing is invisible when it's the actual cause of a miss). taskkill
-        operates purely on the OS process table by image name (which the catalog's own
-        assetPattern already provides, wildcard and all - no derivation needed) and terminates
-        synchronously, without needing to read the target process's module info at all - the
-        same tool Streaming Library Manager's own upstream install script already relies on for
-        this exact purpose. /T also terminates any child processes, covering a self-extracted
-        app that re-execs as one.
+        Stopping the running instance is Stop-WinUtilProcessByAssetPattern's job (taskkill's
+        /FI IMAGENAME filter, not /IM directly, and not Get-Process/Stop-Process) - see that
+        function's own docstring for the full history of why: two PowerShell-side Get-Process
+        approaches, then a first taskkill /IM attempt, were all confirmed live to still silently
+        fail to stop Pluto for Channels' actual running process. Remove-Item then hit that
+        still-open file and failed to fully delete the folder, but that failure is a
+        non-terminating per-item error Remove-Item doesn't throw as a catchable exception, so
+        the WARN-on-incomplete-deletion check below (this function's other fix) correctly
+        reported it as incomplete rather than lying about success - the deletion really was
+        incomplete, just for a root cause that took several rounds to actually pin down.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -7970,7 +8019,7 @@ Function Uninstall-WinUtilProgramGithub {
                 # is still worth it, simpler than polling for something taskkill itself doesn't
                 # give us a handle to poll.
                 if ($package.assetPattern) {
-                    & taskkill /F /IM $package.assetPattern /T 2>$null | Out-Null
+                    Stop-WinUtilProcessByAssetPattern -AssetPattern $package.assetPattern
                     Start-Sleep -Milliseconds 500
                 }
 
@@ -8324,6 +8373,14 @@ function Initialize-WPFUI {
 
             $appPopupStackPanel = New-Object Windows.Controls.StackPanel
             $appPopupStackPanel.Orientation = "Horizontal"
+            # An explicit (if invisible) Background is required for the gaps BETWEEN buttons -
+            # created by each button's own margin (AppEntryMargin) - to count as "inside" the
+            # panel for mouse hit-testing. WPF panels with no Background at all are hit-test
+            # transparent in any unpainted area, so without this, MouseLeave fired (closing the
+            # whole popup) the instant the mouse crossed from one icon toward the next, before
+            # its tooltip had a chance to show - confirmed live, this made it impossible to read
+            # more than one icon's tooltip per right-click.
+            $appPopupStackPanel.Background = [Windows.Media.Brushes]::Transparent
             $appPopupStackPanel.Add_MouseLeave({
                 $sync.appPopup.IsOpen = $false
             })
@@ -8333,7 +8390,8 @@ function Initialize-WPFUI {
             [PSCustomObject]@{ Name = "Install";    Icon = [char]0xE118 },
             [PSCustomObject]@{ Name = "Uninstall";  Icon = [char]0xE74D },
             [PSCustomObject]@{ Name = "Info";       Icon = [char]0xE946 },
-            [PSCustomObject]@{ Name = "Open";       Icon = [char]0xE8A7 }
+            [PSCustomObject]@{ Name = "Open";       Icon = [char]0xE8A7 },
+            [PSCustomObject]@{ Name = "Open2";      Icon = [char]0xE8A7 }
             )
             foreach ($button in $appButtons) {
                 $newButton = New-Object Windows.Controls.Button
@@ -8390,6 +8448,40 @@ function Initialize-WPFUI {
                                     "Launch $($appObject.content)"
                                 } else {
                                     "Couldn't find a web interface or installed shortcut for $($appObject.content)"
+                                }
+                            }
+                        })
+                        $newButton.Add_Click({
+                            if ($this.Tag) {
+                                Open-WinUtilLink -Target $this.Tag
+                            }
+                        })
+                    }
+                    "Open2" {
+                        # A second, optional launch target for the handful of apps that
+                        # genuinely have two (config/applications.json "secondaryOpen") - e.g.
+                        # Olivetin EZ-Start also bundles Portainer on its own port, and WSL2 has
+                        # a native "WSL Settings" GUI app worth surfacing directly. Same shape as
+                        # "Open" (a "webui" URL or an appName resolved via
+                        # Find-WinUtilAppLaunchTarget), just a second entry rather than the
+                        # single implicit one "Open" already covers. Hidden entirely (see the
+                        # right-click handler in Initialize-InstallAppEntry.ps1, which sets this
+                        # button's Visibility per-app before the popup opens) for the vast
+                        # majority of apps that don't declare one, rather than showing a second
+                        # icon that does nothing for every other app.
+                        $sync.appPopupOpen2Button = $newButton
+                        $newButton.Add_MouseEnter({
+                            $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
+                            $secondary = $appObject.secondaryOpen
+                            if ($secondary.webui) {
+                                $this.Tag = $secondary.webui
+                                $this.ToolTip = "Open $($secondary.label)`n$($secondary.webui)"
+                            } elseif ($secondary.appName) {
+                                $this.Tag = Find-WinUtilAppLaunchTarget -AppName $secondary.appName
+                                $this.ToolTip = if ($this.Tag) {
+                                    "Launch $($secondary.label)"
+                                } else {
+                                    "Couldn't find $($secondary.label) - is it installed?"
                                 }
                             }
                         })
@@ -11331,6 +11423,10 @@ $sync.configs.applications = @'
     "link": "https://learn.microsoft.com/windows/wsl/",
     "handle": "Microsoft",
     "installType": "wslFeature",
+    "secondaryOpen": {
+      "label": "WSL Settings",
+      "appName": "WSL Settings"
+    },
     "foss": true
   },
   "WPFInstalldebian": {
@@ -11399,6 +11495,10 @@ $sync.configs.applications = @'
     "link": "https://github.com/bnhf/OliveTin",
     "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
     "webui": "http://localhost:1337",
+    "secondaryOpen": {
+      "label": "Portainer",
+      "webui": "http://localhost:9000"
+    },
     "handle": "@bnhf",
     "installType": "wslCommand",
     "distro": "Debian",

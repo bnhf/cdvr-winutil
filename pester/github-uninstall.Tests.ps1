@@ -9,6 +9,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilProgramGithub.ps1")
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPortableGithubInstallDir.ps1")
     . (Join-Path $script:repoRoot "functions\private\Test-WinUtilPortableGithubInstalled.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Stop-WinUtilProcessByAssetPattern.ps1")
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
     function Set-WinUtilProcessForeground { param($Process) }
@@ -45,6 +46,38 @@ Describe "Test-WinUtilPortableGithubInstalled" {
         Mock Get-ChildItem { $null }
 
         Test-WinUtilPortableGithubInstalled -Name "Pluto for Channels" -AssetPattern "PlutoForChannels*.exe" | Should -BeFalse
+    }
+}
+
+Describe "Stop-WinUtilProcessByAssetPattern" {
+    BeforeEach {
+        function taskkill { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+        Mock taskkill { }
+    }
+
+    It "strips everything after the first wildcard, keeping the wildcard, before building the filter" {
+        # Regression guard for the actual root cause behind three separate live reports of the
+        # same symptom (Pluto for Channels' uninstall reporting incomplete, and a reinstall
+        # failing to replace a locked file): confirmed empirically against a real running
+        # process, taskkill's /FI IMAGENAME filter only supports a wildcard with NOTHING after
+        # it - "IMAGENAME eq cm*" correctly matched and killed a real process; "IMAGENAME eq
+        # cm*.exe" failed outright with "ERROR: The search filter cannot be recognized." An
+        # earlier fix used "taskkill /IM PlutoForChannels*.exe" directly, which was ALSO
+        # confirmed empirically to silently match and kill nothing at all - /IM doesn't support
+        # wildcards despite being commonly described as if it did.
+        Stop-WinUtilProcessByAssetPattern -AssetPattern "PlutoForChannels*.exe"
+
+        Should -Invoke -CommandName taskkill -Times 1 -Exactly -ParameterFilter {
+            (@($Arguments) -join "|") -eq '/F|/FI|IMAGENAME eq PlutoForChannels*|/T'
+        }
+    }
+
+    It "passes a literal pattern through unchanged when it has no wildcard at all" {
+        Stop-WinUtilProcessByAssetPattern -AssetPattern "slm.exe"
+
+        Should -Invoke -CommandName taskkill -Times 1 -Exactly -ParameterFilter {
+            (@($Arguments) -join "|") -eq '/F|/FI|IMAGENAME eq slm.exe|/T'
+        }
     }
 }
 
@@ -164,34 +197,27 @@ Describe "Uninstall-WinUtilProgramGithub" {
     Context "portable packages (no setup wizard, never register in Add/Remove Programs)" {
         BeforeEach {
             Mock Write-WinUtilLog { }
-            function taskkill { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
-            Mock taskkill { }
+            Mock Stop-WinUtilProcessByAssetPattern { }
             Mock Start-Sleep { }
             Mock Test-Path { $true }
             Mock Remove-Item { }
         }
 
-        It "stops any running instance via taskkill (by image name, not Get-Process/Stop-Process) and deletes the fixed install folder, without an Add/Remove Programs lookup" {
+        It "stops any running instance via Stop-WinUtilProcessByAssetPattern and deletes the fixed install folder, without an Add/Remove Programs lookup" {
             # Regression guard for the actual reported bug: Pluto for Channels' uninstall always
             # failed with "No program matching '*Pluto for Channels*' found in Windows'
             # Add/Remove Programs list" - confirmed via its own repo docs, this app is a
             # standalone portable exe that never registers itself there, so that lookup could
-            # never succeed no matter what was actually installed. Two LATER bugs in this same
-            # area, both confirmed live and reported again after their own fix: matching the
-            # running process via Get-Process by install-folder Path alone, then by Path-or-Name,
-            # both still missed Pluto for Channels' actual running process (a large single-file
-            # bundle, the standard shape for a PyInstaller "onefile" build) - Get-Process's
-            # Path/Name properties both depend on reading another process's module info, which
-            # can silently fail across the integrity-level boundary between WinUtil's own
-            # elevated process and this app's de-elevated one. taskkill matches by image name
-            # directly against the OS process table instead, with no module-info read needed.
+            # never succeed no matter what was actually installed. Stopping the running instance
+            # itself took three rounds to get right - see Stop-WinUtilProcessByAssetPattern's own
+            # docstring for that history.
             $installDir = Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels"
             $package = [pscustomobject]@{ content = "Pluto for Channels"; portable = $true; assetPattern = "PlutoForChannels*.exe" }
 
             Uninstall-WinUtilProgramGithub -Packages @($package)
 
-            Should -Invoke -CommandName taskkill -Times 1 -Exactly -ParameterFilter {
-                (@($Arguments) -join "|") -eq "/F|/IM|PlutoForChannels*.exe|/T"
+            Should -Invoke -CommandName Stop-WinUtilProcessByAssetPattern -Times 1 -Exactly -ParameterFilter {
+                $AssetPattern -eq "PlutoForChannels*.exe"
             }
             Should -Invoke -CommandName Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq $installDir -and $Recurse -eq $true -and $Force -eq $true
@@ -199,10 +225,10 @@ Describe "Uninstall-WinUtilProgramGithub" {
             Should -Invoke -CommandName Get-WinUtilProgramUninstallString -Times 0 -Exactly
         }
 
-        It "does not call taskkill when the package has no assetPattern to match by" {
+        It "does not call Stop-WinUtilProcessByAssetPattern when the package has no assetPattern to match by" {
             Uninstall-WinUtilProgramGithub -Packages @([pscustomobject]@{ content = "Pluto for Channels"; portable = $true })
 
-            Should -Invoke -CommandName taskkill -Times 0 -Exactly
+            Should -Invoke -CommandName Stop-WinUtilProcessByAssetPattern -Times 0 -Exactly
         }
 
         It "does not attempt to delete anything when the install folder doesn't exist" {

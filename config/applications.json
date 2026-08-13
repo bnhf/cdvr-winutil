@@ -80,6 +80,7 @@
         "link": "https://learn.microsoft.com/windows/wsl/",
         "handle": "Microsoft",
         "installType": "wslFeature",
+        "secondaryOpen": { "label": "WSL Settings", "appName": "WSL Settings" },
         "foss": true
     },
     "debian": {
@@ -146,6 +147,7 @@
         "link": "https://github.com/bnhf/OliveTin",
         "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
         "webui": "http://localhost:1337",
+        "secondaryOpen": { "label": "Portainer", "webui": "http://localhost:9000" },
         "handle": "@bnhf",
         "installType": "wslCommand",
         "distro": "Debian",
