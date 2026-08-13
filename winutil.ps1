@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1624
+    Version        : v2026.08.13.1635
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1624"
+$sync.version = "v2026.08.13.1635"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2165,13 +2165,21 @@ Function Install-WinUtilProgramNpm {
 
         preUninstallCommand (catalog field, optional) runs before "npm uninstall", the mirror of
         postInstallCommand running after "npm install" - added for Prismcast specifically, whose
-        "prismcast service install" postInstallCommand registers and starts a real background
-        Windows service. Confirmed live: uninstalling without stopping that service first fails
+        "prismcast service install" postInstallCommand registers a Task Scheduler-based
+        background service that keeps a node.exe process running. Confirmed live over two
+        rounds: the first attempt used "prismcast service uninstall" alone, which still failed
         with npm error EBUSY ("resource busy or locked") trying to rename/delete the package
-        folder out from under the still-running process holding its files open. Best-effort, not
-        gating: a failure here is logged but doesn't abort the npm uninstall attempt itself,
-        since npm's own EBUSY failure is still a clear, actionable signal on its own if this step
-        didn't fully resolve the lock for some other reason.
+        folder - reading Prismcast's own source (its Windows service generator) showed why:
+        "service uninstall" only deregisters the scheduled task definition, it never calls
+        "service stop" (the one that actually runs Stop-ScheduledTask and terminates the running
+        process) - so the process kept running, orphaned from Task Scheduler but still very much
+        alive and holding its files open, no matter how long the catalog waited afterward. The
+        catalog value runs "service stop" first, then "service uninstall" to also clean up the
+        task registration, then a short pause for the OS to finish releasing the just-closed
+        process's file handles. Best-effort, not gating: a failure here is logged but doesn't
+        abort the npm uninstall attempt itself, since npm's own EBUSY failure is still a clear,
+        actionable signal on its own if this step didn't fully resolve the lock for some other
+        reason.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -11671,7 +11679,7 @@ $sync.configs.applications = @'
     "npmPackage": "prismcast",
     "npmAllowScripts": "ffmpeg-for-homebridge",
     "postInstallCommand": "prismcast service install",
-    "preUninstallCommand": "prismcast service uninstall",
+    "preUninstallCommand": "prismcast service stop\nprismcast service uninstall\nStart-Sleep -Milliseconds 500",
     "requires": [
       "nodejs",
       "chrome"

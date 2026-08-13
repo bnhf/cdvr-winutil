@@ -119,10 +119,11 @@ Describe "Install-WinUtilProgramNpm preUninstallCommand" {
         # Regression guard for the actual reported bug: uninstalling Prismcast failed with npm
         # error EBUSY ("resource busy or locked") trying to rename/delete its package folder,
         # because the background Windows service it registers at install time
-        # ("prismcast service install") was still running and holding those files open. Running
-        # "prismcast service uninstall" first (mirroring postInstallCommand's own "run something
-        # after npm install" shape, just before "npm uninstall" instead) stops and removes that
-        # service so npm's own file operations aren't fighting a live process for the same files.
+        # ("prismcast service install") was still running and holding those files open. This
+        # mechanism (mirroring postInstallCommand's own "run something around the npm call"
+        # shape) is what makes the catalog's own fix possible - see Install-WinUtilProgramNpm's
+        # own docstring for what that catalog value actually needs to run and why (confirmed via
+        # Prismcast's own source: "service uninstall" alone never stops the running process).
         Remove-Variable -Name preUninstallRanBeforeNpm -Scope Script -ErrorAction SilentlyContinue
         Mock Start-Process {
             $script:preUninstallRanBeforeNpm = $script:preUninstallRan -eq $true
