@@ -164,49 +164,45 @@ Describe "Uninstall-WinUtilProgramGithub" {
     Context "portable packages (no setup wizard, never register in Add/Remove Programs)" {
         BeforeEach {
             Mock Write-WinUtilLog { }
-            Mock Get-Process { }
-            # The post-Stop-Process polling wait re-checks Get-Process -Id per stopped process -
-            # returning nothing for that specific shape simulates an immediate exit, so tests
-            # don't actually burn wall-clock time sitting in that wait loop.
-            Mock Get-Process { $null } -ParameterFilter { $null -ne $Id }
-            Mock Stop-Process { }
+            function taskkill { param([Parameter(ValueFromRemainingArguments = $true)]$Arguments) }
+            Mock taskkill { }
+            Mock Start-Sleep { }
             Mock Test-Path { $true }
             Mock Remove-Item { }
         }
 
-        It "stops any running instance (matched by install-folder path OR process name) and deletes the fixed install folder, without an Add/Remove Programs lookup" {
+        It "stops any running instance via taskkill (by image name, not Get-Process/Stop-Process) and deletes the fixed install folder, without an Add/Remove Programs lookup" {
             # Regression guard for the actual reported bug: Pluto for Channels' uninstall always
             # failed with "No program matching '*Pluto for Channels*' found in Windows'
             # Add/Remove Programs list" - confirmed via its own repo docs, this app is a
             # standalone portable exe that never registers itself there, so that lookup could
-            # never succeed no matter what was actually installed. A second, later bug in this
-            # same area: matching the running process by install-folder Path alone missed a
-            # still-running instance for Pluto for Channels specifically (a large single-file
-            # bundle, the standard shape for a PyInstaller "onefile" build) - matching by name
-            # too (derived from whatever's actually on disk matching the catalog's assetPattern)
-            # is what the second fake process here (a name-only match, no Path overlap) guards.
+            # never succeed no matter what was actually installed. Two LATER bugs in this same
+            # area, both confirmed live and reported again after their own fix: matching the
+            # running process via Get-Process by install-folder Path alone, then by Path-or-Name,
+            # both still missed Pluto for Channels' actual running process (a large single-file
+            # bundle, the standard shape for a PyInstaller "onefile" build) - Get-Process's
+            # Path/Name properties both depend on reading another process's module info, which
+            # can silently fail across the integrity-level boundary between WinUtil's own
+            # elevated process and this app's de-elevated one. taskkill matches by image name
+            # directly against the OS process table instead, with no module-info read needed.
             $installDir = Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels"
-            Mock Get-ChildItem {
-                [pscustomobject]@{ Name = "PlutoForChannels.exe" }
-            } -ParameterFilter { $Path -eq $installDir -and $Filter -eq "PlutoForChannels*.exe" }
-            Mock Get-Process {
-                @(
-                    [pscustomobject]@{ Id = 4242; Name = "PlutoForChannels"; Path = Join-Path $installDir "PlutoForChannels.exe" }
-                    [pscustomobject]@{ Id = 5150; Name = "PlutoForChannels"; Path = "C:\Users\someone\AppData\Local\Temp\_MEI12345\PlutoForChannels.exe" }
-                    [pscustomobject]@{ Id = 9999; Name = "explorer"; Path = "C:\Windows\explorer.exe" }
-                )
-            } -ParameterFilter { $null -eq $Id }
             $package = [pscustomobject]@{ content = "Pluto for Channels"; portable = $true; assetPattern = "PlutoForChannels*.exe" }
 
             Uninstall-WinUtilProgramGithub -Packages @($package)
 
-            Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
-            Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 5150 }
-            Should -Invoke -CommandName Stop-Process -Times 0 -Exactly -ParameterFilter { $Id -eq 9999 }
+            Should -Invoke -CommandName taskkill -Times 1 -Exactly -ParameterFilter {
+                (@($Arguments) -join "|") -eq "/F|/IM|PlutoForChannels*.exe|/T"
+            }
             Should -Invoke -CommandName Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq $installDir -and $Recurse -eq $true -and $Force -eq $true
             }
             Should -Invoke -CommandName Get-WinUtilProgramUninstallString -Times 0 -Exactly
+        }
+
+        It "does not call taskkill when the package has no assetPattern to match by" {
+            Uninstall-WinUtilProgramGithub -Packages @([pscustomobject]@{ content = "Pluto for Channels"; portable = $true })
+
+            Should -Invoke -CommandName taskkill -Times 0 -Exactly
         }
 
         It "does not attempt to delete anything when the install folder doesn't exist" {

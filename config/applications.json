@@ -259,6 +259,7 @@
         "handle": "@hjd",
         "installType": "npm",
         "npmPackage": "prismcast",
+        "npmAllowScripts": "ffmpeg-for-homebridge",
         "postInstallCommand": "prismcast service install",
         "requires": ["nodejs", "chrome"],
         "foss": true

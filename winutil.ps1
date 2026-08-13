@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1434
+    Version        : v2026.08.13.1505
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1434"
+$sync.version = "v2026.08.13.1505"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2049,40 +2049,24 @@ Function Install-WinUtilProgramGithub {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
                 # Stop a previous run of this exact install first, so a reinstall/update isn't
-                # blocked by the old file being locked open. Explicit -Id/foreach, not a
-                # Get-Process | Stop-Process pipeline (or -InputObject, which is strongly typed
-                # to [System.Diagnostics.Process[]] on the real cmdlet and can't be satisfied by
-                # a test double) - matches the pattern Start-WinUtilProcessAsStandardUserNoWait's
-                # own process lookup already uses.
-                #
-                # Matches by process NAME too (the file currently on disk, plus the incoming
-                # asset's own name), not just install-folder Path - confirmed live for Pluto for
-                # Channels (a large single-file bundle, the standard shape for a PyInstaller
-                # "onefile" build) that Path alone can miss a still-running instance, which then
-                # blocked the file replace below with no clear error.
-                $existingNames = @()
-                if (Test-Path $installDir) {
-                    $existingNames = @(Get-ChildItem -Path $installDir -ErrorAction SilentlyContinue |
-                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
-                }
-                $runningNames = @($existingNames + [IO.Path]::GetFileNameWithoutExtension($asset.name) | Select-Object -Unique)
-
-                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $matchesInstallDir = $false
-                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $matchesInstallDir -or ($runningNames -contains $_.Name)
-                })
-                foreach ($runningInstance in $runningInstances) {
-                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
-                }
-
-                # A just-stopped process doesn't always release its file handles instantly -
-                # give it a moment before the Move-Item below, rather than racing it.
-                if ($runningInstances.Count -gt 0) {
-                    $deadline = (Get-Date).AddSeconds(5)
-                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
-                        Start-Sleep -Milliseconds 250
-                    }
+                # blocked by the old file being locked open. Via taskkill /IM /T, not Get-Process/
+                # Stop-Process - two PowerShell-side matching approaches (Path alone, then
+                # Path-or-Name) were both confirmed live to still miss Pluto for Channels' actual
+                # running process (a large single-file bundle, the standard shape for a
+                # PyInstaller "onefile" build). Get-Process's Path/Name properties both depend on
+                # reading another process's MainModule info, which can silently fail across the
+                # integrity-level boundary between WinUtil's own elevated process and this app's
+                # de-elevated one. taskkill operates purely on the OS process table by image name
+                # (which the catalog's own assetPattern already provides, wildcard and all) and
+                # terminates synchronously, without needing to read the target's module info at
+                # all - the same tool Streaming Library Manager's own upstream install script
+                # already relies on for this exact purpose. /T also terminates any child
+                # processes, covering a self-extracted app that re-execs as one.
+                if ($assetPattern) {
+                    & taskkill /F /IM $assetPattern /T 2>$null | Out-Null
+                    # A brief fixed pause, not a poll - taskkill's own termination is synchronous,
+                    # but the OS can lag slightly releasing a just-killed process's file handles.
+                    Start-Sleep -Milliseconds 500
                 }
 
                 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
@@ -2156,6 +2140,15 @@ Function Install-WinUtilProgramNpm {
         cmd.exe the way typing "npm ..." at a prompt would. This exact error was previously
         masked by an earlier PATH-detection bug (npm wasn't found on PATH at all, so this call
         was never reached) - fixing that surfaced this next, previously-unreachable failure.
+
+        npmAllowScripts (catalog field, optional) passes "--allow-scripts=<value>" through to
+        npm - npm blocks a dependency's own install/postinstall scripts by default unless
+        explicitly allowlisted (confirmed live for Prismcast: ffmpeg-for-homebridge's
+        install.js, which fetches its bundled ffmpeg binary, was silently skipped, only logged
+        as an npm warning rather than failing the install outright). Deliberately per-package,
+        not a blanket "allow everything" flag for every npm-type install - that would defeat the
+        point of npm's own default-deny protection against arbitrary install-time code execution
+        for every OTHER npm-type package, most of which have no declared need for it.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -2186,9 +2179,14 @@ Function Install-WinUtilProgramNpm {
         }
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
+        $npmArgs = @("/c", "npm", $npmVerb, "-g", $npmPackage)
+        if ($Action -eq "Install" -and -not [string]::IsNullOrWhiteSpace($package.npmAllowScripts)) {
+            $npmArgs += "--allow-scripts=$($package.npmAllowScripts)"
+        }
+
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
         if ($ProgressCallback) { try { & $ProgressCallback "$Action $name via npm..." } catch {} }
-        $process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "npm", $npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
+        $process = Start-Process -FilePath "cmd.exe" -ArgumentList $npmArgs -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
 
         # Some npm-distributed tools need a separate step to actually start running (or set up
@@ -6406,6 +6404,18 @@ function Show-CustomDialog {
     .PARAMETER EnableScroll
     A flag indicating whether to enable scrolling if the content exceeds the window size.
 
+    .PARAMETER Items
+    An optional list of objects (each with a Name and Description property) rendered as a
+    clean, properly-themed list below Message - Name bold at full opacity, Description wrapped
+    underneath it at reduced opacity for visual hierarchy. Use this instead of trying to fake a
+    text table via Select-Object/Out-String in Message: this dialog's TextBlocks use a
+    proportional font, so space-padded "columns" in plain text never actually line up.
+
+    .PARAMETER Buttons
+    "OK" (default) or "YesNo". In "YesNo" mode the dialog returns the string "Yes" or "No"
+    depending on which the user clicked - matches Show-WinUtilMessage's own return convention,
+    so callers written against that (e.g. "if ($confirm -eq 'No') { return }") work unchanged.
+
     .EXAMPLE
     Show-CustomDialog -Title "My Custom Dialog" -Message "This is a custom dialog with a message and an image above." -Width 300 -Height 200
 
@@ -6444,7 +6454,12 @@ function Show-CustomDialog {
         [System.Windows.Media.SolidColorBrush]$LinkForegroundColor = $sync.Form.Resources.LinkForegroundColor,
         [System.Windows.Media.SolidColorBrush]$LinkHoverForegroundColor = $sync.Form.Resources.LinkHoverForegroundColor,
 
-        [bool]$EnableScroll = $false
+        [bool]$EnableScroll = $false,
+
+        [object[]]$Items,
+
+        [ValidateSet("OK", "YesNo")]
+        [string]$Buttons = "OK"
     )
 
     # Create a custom dialog window
@@ -6507,9 +6522,9 @@ function Show-CustomDialog {
     $row2.Height = [Windows.GridLength]::Auto
 
     # Add Row Definitions to Grid
-    $grid.RowDefinitions.Add($row0)
-    $grid.RowDefinitions.Add($row1)
-    $grid.RowDefinitions.Add($row2)
+    $grid.RowDefinitions.Add($row0) | Out-Null
+    $grid.RowDefinitions.Add($row1) | Out-Null
+    $grid.RowDefinitions.Add($row2) | Out-Null
 
     # Add StackPanel for horizontal layout with margins
     $stackPanel = New-Object Windows.Controls.StackPanel
@@ -6518,11 +6533,11 @@ function Show-CustomDialog {
     $stackPanel.HorizontalAlignment = [Windows.HorizontalAlignment]::Left  # Align to the left
     $stackPanel.VerticalAlignment = [Windows.VerticalAlignment]::Top  # Align to the top
 
-    $grid.Children.Add($stackPanel)
+    $grid.Children.Add($stackPanel) | Out-Null
     [Windows.Controls.Grid]::SetRow($stackPanel, 0)  # Set the row to the second row (0-based index)
 
     # Add SVG path to the stack panel
-    $stackPanel.Children.Add((Invoke-WinUtilAssets -Type "logo" -Size $LogoSize))
+    $stackPanel.Children.Add((Invoke-WinUtilAssets -Type "logo" -Size $LogoSize)) | Out-Null
 
     # Add "Winutil" text
     $winutilTextBlock = New-Object Windows.Controls.TextBlock
@@ -6530,7 +6545,7 @@ function Show-CustomDialog {
     $winutilTextBlock.FontSize = $HeaderFontSize
     $winutilTextBlock.Foreground = $LogoColor
     $winutilTextBlock.Margin = New-Object Windows.Thickness(10, 10, 10, 5)  # Add margins around the text block
-    $stackPanel.Children.Add($winutilTextBlock)
+    $stackPanel.Children.Add($winutilTextBlock) | Out-Null
     # Add TextBlock for information with text wrapping and margins
     $messageTextBlock = New-Object Windows.Controls.TextBlock
     $messageTextBlock.FontSize = $FontSize
@@ -6549,13 +6564,13 @@ function Show-CustomDialog {
         # Add the text before the hyperlink, if any
         $textBefore = $Message.Substring($lastPos, $match.Index - $lastPos)
         if ($textBefore.Length -gt 0) {
-            $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($textBefore)))
+            $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($textBefore))) | Out-Null
         }
 
         # Create and add the hyperlink
         $hyperlink = New-Object Windows.Documents.Hyperlink
         $hyperlink.NavigateUri = New-Object System.Uri($match.Groups[1].Value)
-        $hyperlink.Inlines.Add($match.Groups[2].Value)
+        $hyperlink.Inlines.Add($match.Groups[2].Value) | Out-Null
         $hyperlink.TextDecorations = [Windows.TextDecorations]::None  # Remove underline
         $hyperlink.Foreground = $LinkForegroundColor
 
@@ -6579,7 +6594,7 @@ function Show-CustomDialog {
             $eventSender.FontWeight = "Normal"
         })
 
-        $messageTextBlock.Inlines.Add($hyperlink)
+        $messageTextBlock.Inlines.Add($hyperlink) | Out-Null
 
         # Update the last position
         $lastPos = $match.Index + $match.Length
@@ -6588,12 +6603,44 @@ function Show-CustomDialog {
     # Add any remaining text after the last hyperlink
     if ($lastPos -lt $Message.Length) {
         $textAfter = $Message.Substring($lastPos)
-        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($textAfter)))
+        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($textAfter))) | Out-Null
     }
 
     # If no matches, add the entire message as a run
     if ($regex.Matches($Message).Count -eq 0) {
-        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($Message)))
+        $messageTextBlock.Inlines.Add((New-Object Windows.Documents.Run($Message))) | Out-Null
+    }
+
+    # Content panel: the message text block, plus (when supplied) a clean Name/Description list
+    # below it - real WPF rows with a bold Name and a wrapped, reduced-opacity Description,
+    # rather than a space-padded plain-text "table" that only lines up in a monospace font this
+    # dialog doesn't use.
+    $contentPanel = New-Object Windows.Controls.StackPanel
+    $contentPanel.Children.Add($messageTextBlock) | Out-Null
+
+    foreach ($item in $Items) {
+        $itemPanel = New-Object Windows.Controls.StackPanel
+        $itemPanel.Margin = New-Object Windows.Thickness(10, 8, 10, 0)
+
+        $itemNameBlock = New-Object Windows.Controls.TextBlock
+        $itemNameBlock.Text = $item.Name
+        $itemNameBlock.FontSize = $FontSize
+        $itemNameBlock.FontWeight = [Windows.FontWeights]::Bold
+        $itemNameBlock.Foreground = $ForegroundColor
+        $itemNameBlock.TextWrapping = [Windows.TextWrapping]::Wrap
+        $itemPanel.Children.Add($itemNameBlock) | Out-Null
+
+        if (-not [string]::IsNullOrWhiteSpace($item.Description)) {
+            $itemDescriptionBlock = New-Object Windows.Controls.TextBlock
+            $itemDescriptionBlock.Text = $item.Description
+            $itemDescriptionBlock.FontSize = $FontSize
+            $itemDescriptionBlock.Foreground = $ForegroundColor
+            $itemDescriptionBlock.Opacity = 0.7
+            $itemDescriptionBlock.TextWrapping = [Windows.TextWrapping]::Wrap
+            $itemPanel.Children.Add($itemDescriptionBlock) | Out-Null
+        }
+
+        $contentPanel.Children.Add($itemPanel) | Out-Null
     }
 
     # Create a ScrollViewer if EnableScroll is true
@@ -6601,44 +6648,94 @@ function Show-CustomDialog {
         $scrollViewer = New-Object System.Windows.Controls.ScrollViewer
         $scrollViewer.VerticalScrollBarVisibility = 'Auto'
         $scrollViewer.HorizontalScrollBarVisibility = 'Disabled'
-        $scrollViewer.Content = $messageTextBlock
-        $grid.Children.Add($scrollViewer)
+        $scrollViewer.Content = $contentPanel
+        $grid.Children.Add($scrollViewer) | Out-Null
         [Windows.Controls.Grid]::SetRow($scrollViewer, 1)  # Set the row to the second row (0-based index)
     } else {
-        $grid.Children.Add($messageTextBlock)
-        [Windows.Controls.Grid]::SetRow($messageTextBlock, 1)  # Set the row to the second row (0-based index)
+        $grid.Children.Add($contentPanel) | Out-Null
+        [Windows.Controls.Grid]::SetRow($contentPanel, 1)  # Set the row to the second row (0-based index)
     }
 
-    # Add OK button
-    $okButton = New-Object Windows.Controls.Button
-    $okButton.Content = "OK"
-    $okButton.FontSize = $FontSize
-    $okButton.Width = 80
-    $okButton.Height = 30
-    $okButton.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
-    $okButton.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
-    $okButton.Margin = New-Object Windows.Thickness(0, 0, 0, 10)
-    $okButton.Background = $buttonBackgroundColor
-    $okButton.Foreground = $buttonForegroundColor
-    $okButton.BorderBrush = $BorderColor
-    $okButton.Add_Click({
-        $dialog.Close()
-    })
-    $grid.Children.Add($okButton)
-    [Windows.Controls.Grid]::SetRow($okButton, 2)  # Set the row to the third row (0-based index)
+    # Button row: a single OK button, or Yes/No side by side. $resultBox is a mutable reference
+    # object (not a plain variable) specifically so the click handlers below can communicate
+    # their result back out - a plain "$dialogResult = ..." assignment inside a scriptblock
+    # creates a new LOCAL variable that shadows the outer one rather than mutating it (only
+    # reading an outer variable, like $dialog.Close() elsewhere in this function, resolves
+    # through the parent scope automatically; writing to one doesn't). Mutating a property on a
+    # shared object, instead of reassigning a variable, is what actually propagates the click
+    # result back to the "return $resultBox.Value" after ShowDialog() below. Existing OK-only
+    # callers never capture this function's return value, so always returning it here (rather
+    # than only in YesNo mode) is a no-op change for them.
+    $resultBox = [pscustomobject]@{ Value = "OK" }
 
-    # Handle Escape key press to close the dialog
+    $buttonPanel = New-Object Windows.Controls.StackPanel
+    $buttonPanel.Orientation = [Windows.Controls.Orientation]::Horizontal
+    $buttonPanel.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+    $buttonPanel.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
+    $buttonPanel.Margin = New-Object Windows.Thickness(0, 0, 0, 10)
+
+    if ($Buttons -eq "YesNo") {
+        $yesButton = New-Object Windows.Controls.Button
+        $yesButton.Content = "Yes"
+        $yesButton.FontSize = $FontSize
+        $yesButton.Width = 80
+        $yesButton.Height = 30
+        $yesButton.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
+        $yesButton.Background = $buttonBackgroundColor
+        $yesButton.Foreground = $buttonForegroundColor
+        $yesButton.BorderBrush = $BorderColor
+        $yesButton.IsDefault = $true
+        $yesButton.Add_Click({
+            $resultBox.Value = "Yes"
+            $dialog.Close()
+        })
+        $buttonPanel.Children.Add($yesButton) | Out-Null
+
+        $noButton = New-Object Windows.Controls.Button
+        $noButton.Content = "No"
+        $noButton.FontSize = $FontSize
+        $noButton.Width = 80
+        $noButton.Height = 30
+        $noButton.Background = $buttonBackgroundColor
+        $noButton.Foreground = $buttonForegroundColor
+        $noButton.BorderBrush = $BorderColor
+        $noButton.IsCancel = $true
+        $noButton.Add_Click({
+            $resultBox.Value = "No"
+            $dialog.Close()
+        })
+        $buttonPanel.Children.Add($noButton) | Out-Null
+    } else {
+        $okButton = New-Object Windows.Controls.Button
+        $okButton.Content = "OK"
+        $okButton.FontSize = $FontSize
+        $okButton.Width = 80
+        $okButton.Height = 30
+        $okButton.Background = $buttonBackgroundColor
+        $okButton.Foreground = $buttonForegroundColor
+        $okButton.BorderBrush = $BorderColor
+        $okButton.IsDefault = $true
+        $okButton.Add_Click({
+            $dialog.Close()
+        })
+        $buttonPanel.Children.Add($okButton) | Out-Null
+    }
+
+    $grid.Children.Add($buttonPanel) | Out-Null
+    [Windows.Controls.Grid]::SetRow($buttonPanel, 2)  # Set the row to the third row (0-based index)
+
+    # Handle Escape key press to close the dialog - defaults to "No" in YesNo mode (declining is
+    # the safe default for a confirmation), "OK" otherwise, same as the button already would.
     $dialog.Add_KeyDown({
         if ($_.Key -eq 'Escape') {
+            if ($Buttons -eq "YesNo") { $resultBox.Value = "No" }
             $dialog.Close()
         }
     })
 
-    # Set the OK button as the default button (activated on Enter)
-    $okButton.IsDefault = $true
-
     # Show the custom dialog
-    $dialog.ShowDialog()
+    $dialog.ShowDialog() | Out-Null
+    return $resultBox.Value
 }
 
 function Show-WinUtilMessage {
@@ -7821,22 +7918,27 @@ Function Uninstall-WinUtilProgramGithub {
         uninstalling one is the same "stop the process, delete the folder" approach
         Uninstall-WinUtilStreamLinkManager already uses for the same reason.
 
-        Matching the running process by its install-folder Path alone (an earlier version of
-        this did only that) isn't reliable for every portable app: confirmed live for Pluto for
-        Channels, which - being a large (~200MB) single-file bundle, the standard shape for a
-        PyInstaller "onefile" build - can keep its tray-icon process alive under conditions this
-        Path check misses (e.g. self-extracted resources reported under a different path).
-        Whatever the exact cause, the visible symptom was real and bad: the uninstall logged
-        success while a locked file inside the install folder silently made Remove-Item's own
-        deletion incomplete (a non-terminating per-item error, not one Remove-Item throws as a
-        catchable exception) - so the app kept running (the reported tray icon) AND "Show
-        Installed Apps" kept finding it (the folder, and the file the detection check looks
-        for, both still there). Now matches by process NAME too (derived from whatever file(s)
-        actually exist in the install folder matching the catalog's own assetPattern - the same
-        source of truth Test-WinUtilPortableGithubInstalled's own detection uses), waits briefly
-        for a just-stopped process to actually release its file handles before deleting, and -
-        the fix for the false "uninstalled" success message itself - verifies the folder is
-        actually gone afterward rather than assuming Remove-Item's silence means it worked.
+        Stopping the running instance uses taskkill /IM /T, not Get-Process/Stop-Process - two
+        PowerShell-side approaches (Path-matching alone, then Path-or-Name-matching) were both
+        confirmed live to still miss Pluto for Channels' actual running process (a large
+        single-file bundle, the standard shape for a PyInstaller "onefile" build): Remove-Item
+        would then hit that still-open file and fail to fully delete the folder, but that
+        failure is a non-terminating per-item error Remove-Item doesn't throw as a catchable
+        exception, so the WARN-on-incomplete-deletion check below (this function's other fix)
+        correctly reported it as incomplete rather than lying about success - the deletion
+        really was incomplete, just for a reason still tracing back to the same "can't reliably
+        find the running process from here" root cause. Get-Process's Path/Name properties both
+        depend on reading another process's MainModule info, which is exactly the kind of thing
+        that can silently fail across the integrity-level boundary between WinUtil's own
+        elevated process and this app's de-elevated one (swallowed by this code's own try/catch
+        around that read, by design, so a permissions quirk wouldn't crash the whole uninstall -
+        but that same swallowing is invisible when it's the actual cause of a miss). taskkill
+        operates purely on the OS process table by image name (which the catalog's own
+        assetPattern already provides, wildcard and all - no derivation needed) and terminates
+        synchronously, without needing to read the target process's module info at all - the
+        same tool Streaming Library Manager's own upstream install script already relies on for
+        this exact purpose. /T also terminates any child processes, covering a self-extracted
+        app that re-execs as one.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -7862,32 +7964,14 @@ Function Uninstall-WinUtilProgramGithub {
             try {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
-                # Process names the app might be running under, derived from whatever's
-                # actually on disk (not just the catalog's assetPattern string itself, in case
-                # the file was renamed/replaced) - the same folder Install-WinUtilProgramGithub
-                # always uses for this app.
-                $runningNames = @()
-                if ($package.assetPattern -and (Test-Path $installDir)) {
-                    $runningNames = @(Get-ChildItem -Path $installDir -Filter $package.assetPattern -ErrorAction SilentlyContinue |
-                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
-                }
-
-                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $matchesInstallDir = $false
-                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $matchesInstallDir -or ($runningNames -contains $_.Name)
-                })
-                foreach ($runningInstance in $runningInstances) {
-                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
-                }
-
-                # A just-stopped process doesn't always release its file handles instantly -
-                # give it a moment before trying to delete, rather than racing it.
-                if ($runningInstances.Count -gt 0) {
-                    $deadline = (Get-Date).AddSeconds(5)
-                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
-                        Start-Sleep -Milliseconds 250
-                    }
+                # taskkill terminates synchronously (by the time this returns, a matched process
+                # is already gone) - but the OS can lag slightly releasing a just-killed
+                # process's file handles/module mappings, so a brief fixed pause before deleting
+                # is still worth it, simpler than polling for something taskkill itself doesn't
+                # give us a handle to poll.
+                if ($package.assetPattern) {
+                    & taskkill /F /IM $package.assetPattern /T 2>$null | Out-Null
+                    Start-Sleep -Milliseconds 500
                 }
 
                 if (Test-Path $installDir) {
@@ -10618,23 +10702,28 @@ function Invoke-WPFUnInstall {
         return
     }
 
-    $ButtonType = "YesNo"
     $MessageboxTitle = "Are you sure?"
-    # Catalog entries use "content"/"description", not "Name"/"Description" - selecting the
-    # literal wrong property names here left the Name column blank for every app, regardless of
-    # what was actually selected (confirmed live). Calculated properties pull from the correct
-    # source fields while still showing friendly column headers.
-    $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object @{Name='Name'; Expression={$_.content}}, @{Name='Description'; Expression={$_.description}} | Out-String)")
-    $MessageIcon = "Information"
+    $Messageboxbody = "This will uninstall the following applications:"
 
     # Unregistering a WSL distro permanently deletes its filesystem, not just "removes" it -
-    # worth calling out explicitly here rather than folding it into the generic app list above.
+    # worth calling out explicitly here rather than folding it into the generic app list below.
     $wslDataLossPackages = @($PackagesToUninstall | Where-Object { $_.installType -eq "wslFeature" -or $_.installType -eq "wslDistro" })
     if ($wslDataLossPackages.Count -gt 0) {
-        $Messageboxbody += "`nUninstalling WSL2 and/or a WSL distro permanently deletes that distro's filesystem and all data inside it - this cannot be undone."
+        $Messageboxbody += "`n`nUninstalling WSL2 and/or a WSL distro permanently deletes that distro's filesystem and all data inside it - this cannot be undone."
     }
 
-    $confirm = Show-WinUtilMessage -Message $Messageboxbody -Title $MessageboxTitle -Button $ButtonType -Icon $MessageIcon
+    # A native System.Windows.MessageBox (Show-WinUtilMessage) has no way to actually render
+    # aligned columns - it uses a proportional font, so an earlier version of this that tried to
+    # fake a Name/Description table via Select-Object/Out-String just produced misaligned,
+    # unprofessional-looking plain text no matter what the underlying data was. Show-CustomDialog
+    # (already used for About/Sponsors) renders each app as a real row instead - bold name,
+    # wrapped description underneath - and now supports Yes/No, matching Show-WinUtilMessage's
+    # own "Yes"/"No" return convention. Catalog entries use "content"/"description", not
+    # "Name"/"Description" - calculated properties pull from the correct source fields while
+    # still giving Show-CustomDialog's -Items the Name/Description shape it expects.
+    $uninstallItems = $PackagesToUninstall | Select-Object @{Name='Name'; Expression={$_.content}}, @{Name='Description'; Expression={$_.description}}
+
+    $confirm = Show-CustomDialog -Title $MessageboxTitle -Message $Messageboxbody -Items $uninstallItems -Buttons YesNo -Width 480 -Height 450 -EnableScroll $true
 
     if($confirm -eq "No") {return}
 
@@ -11432,6 +11521,7 @@ $sync.configs.applications = @'
     "handle": "@hjd",
     "installType": "npm",
     "npmPackage": "prismcast",
+    "npmAllowScripts": "ffmpeg-for-homebridge",
     "postInstallCommand": "prismcast service install",
     "requires": [
       "nodejs",

@@ -31,22 +31,27 @@ Function Uninstall-WinUtilProgramGithub {
         uninstalling one is the same "stop the process, delete the folder" approach
         Uninstall-WinUtilStreamLinkManager already uses for the same reason.
 
-        Matching the running process by its install-folder Path alone (an earlier version of
-        this did only that) isn't reliable for every portable app: confirmed live for Pluto for
-        Channels, which - being a large (~200MB) single-file bundle, the standard shape for a
-        PyInstaller "onefile" build - can keep its tray-icon process alive under conditions this
-        Path check misses (e.g. self-extracted resources reported under a different path).
-        Whatever the exact cause, the visible symptom was real and bad: the uninstall logged
-        success while a locked file inside the install folder silently made Remove-Item's own
-        deletion incomplete (a non-terminating per-item error, not one Remove-Item throws as a
-        catchable exception) - so the app kept running (the reported tray icon) AND "Show
-        Installed Apps" kept finding it (the folder, and the file the detection check looks
-        for, both still there). Now matches by process NAME too (derived from whatever file(s)
-        actually exist in the install folder matching the catalog's own assetPattern - the same
-        source of truth Test-WinUtilPortableGithubInstalled's own detection uses), waits briefly
-        for a just-stopped process to actually release its file handles before deleting, and -
-        the fix for the false "uninstalled" success message itself - verifies the folder is
-        actually gone afterward rather than assuming Remove-Item's silence means it worked.
+        Stopping the running instance uses taskkill /IM /T, not Get-Process/Stop-Process - two
+        PowerShell-side approaches (Path-matching alone, then Path-or-Name-matching) were both
+        confirmed live to still miss Pluto for Channels' actual running process (a large
+        single-file bundle, the standard shape for a PyInstaller "onefile" build): Remove-Item
+        would then hit that still-open file and fail to fully delete the folder, but that
+        failure is a non-terminating per-item error Remove-Item doesn't throw as a catchable
+        exception, so the WARN-on-incomplete-deletion check below (this function's other fix)
+        correctly reported it as incomplete rather than lying about success - the deletion
+        really was incomplete, just for a reason still tracing back to the same "can't reliably
+        find the running process from here" root cause. Get-Process's Path/Name properties both
+        depend on reading another process's MainModule info, which is exactly the kind of thing
+        that can silently fail across the integrity-level boundary between WinUtil's own
+        elevated process and this app's de-elevated one (swallowed by this code's own try/catch
+        around that read, by design, so a permissions quirk wouldn't crash the whole uninstall -
+        but that same swallowing is invisible when it's the actual cause of a miss). taskkill
+        operates purely on the OS process table by image name (which the catalog's own
+        assetPattern already provides, wildcard and all - no derivation needed) and terminates
+        synchronously, without needing to read the target process's module info at all - the
+        same tool Streaming Library Manager's own upstream install script already relies on for
+        this exact purpose. /T also terminates any child processes, covering a self-extracted
+        app that re-execs as one.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -72,32 +77,14 @@ Function Uninstall-WinUtilProgramGithub {
             try {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
-                # Process names the app might be running under, derived from whatever's
-                # actually on disk (not just the catalog's assetPattern string itself, in case
-                # the file was renamed/replaced) - the same folder Install-WinUtilProgramGithub
-                # always uses for this app.
-                $runningNames = @()
-                if ($package.assetPattern -and (Test-Path $installDir)) {
-                    $runningNames = @(Get-ChildItem -Path $installDir -Filter $package.assetPattern -ErrorAction SilentlyContinue |
-                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
-                }
-
-                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $matchesInstallDir = $false
-                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $matchesInstallDir -or ($runningNames -contains $_.Name)
-                })
-                foreach ($runningInstance in $runningInstances) {
-                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
-                }
-
-                # A just-stopped process doesn't always release its file handles instantly -
-                # give it a moment before trying to delete, rather than racing it.
-                if ($runningInstances.Count -gt 0) {
-                    $deadline = (Get-Date).AddSeconds(5)
-                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
-                        Start-Sleep -Milliseconds 250
-                    }
+                # taskkill terminates synchronously (by the time this returns, a matched process
+                # is already gone) - but the OS can lag slightly releasing a just-killed
+                # process's file handles/module mappings, so a brief fixed pause before deleting
+                # is still worth it, simpler than polling for something taskkill itself doesn't
+                # give us a handle to poll.
+                if ($package.assetPattern) {
+                    & taskkill /F /IM $package.assetPattern /T 2>$null | Out-Null
+                    Start-Sleep -Milliseconds 500
                 }
 
                 if (Test-Path $installDir) {

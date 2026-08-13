@@ -17,6 +17,15 @@ Function Install-WinUtilProgramNpm {
         cmd.exe the way typing "npm ..." at a prompt would. This exact error was previously
         masked by an earlier PATH-detection bug (npm wasn't found on PATH at all, so this call
         was never reached) - fixing that surfaced this next, previously-unreachable failure.
+
+        npmAllowScripts (catalog field, optional) passes "--allow-scripts=<value>" through to
+        npm - npm blocks a dependency's own install/postinstall scripts by default unless
+        explicitly allowlisted (confirmed live for Prismcast: ffmpeg-for-homebridge's
+        install.js, which fetches its bundled ffmpeg binary, was silently skipped, only logged
+        as an npm warning rather than failing the install outright). Deliberately per-package,
+        not a blanket "allow everything" flag for every npm-type install - that would defeat the
+        point of npm's own default-deny protection against arbitrary install-time code execution
+        for every OTHER npm-type package, most of which have no declared need for it.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -47,9 +56,14 @@ Function Install-WinUtilProgramNpm {
         }
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
+        $npmArgs = @("/c", "npm", $npmVerb, "-g", $npmPackage)
+        if ($Action -eq "Install" -and -not [string]::IsNullOrWhiteSpace($package.npmAllowScripts)) {
+            $npmArgs += "--allow-scripts=$($package.npmAllowScripts)"
+        }
+
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
         if ($ProgressCallback) { try { & $ProgressCallback "$Action $name via npm..." } catch {} }
-        $process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "npm", $npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
+        $process = Start-Process -FilePath "cmd.exe" -ArgumentList $npmArgs -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
 
         # Some npm-distributed tools need a separate step to actually start running (or set up

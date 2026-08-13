@@ -21,23 +21,28 @@ function Invoke-WPFUnInstall {
         return
     }
 
-    $ButtonType = "YesNo"
     $MessageboxTitle = "Are you sure?"
-    # Catalog entries use "content"/"description", not "Name"/"Description" - selecting the
-    # literal wrong property names here left the Name column blank for every app, regardless of
-    # what was actually selected (confirmed live). Calculated properties pull from the correct
-    # source fields while still showing friendly column headers.
-    $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object @{Name='Name'; Expression={$_.content}}, @{Name='Description'; Expression={$_.description}} | Out-String)")
-    $MessageIcon = "Information"
+    $Messageboxbody = "This will uninstall the following applications:"
 
     # Unregistering a WSL distro permanently deletes its filesystem, not just "removes" it -
-    # worth calling out explicitly here rather than folding it into the generic app list above.
+    # worth calling out explicitly here rather than folding it into the generic app list below.
     $wslDataLossPackages = @($PackagesToUninstall | Where-Object { $_.installType -eq "wslFeature" -or $_.installType -eq "wslDistro" })
     if ($wslDataLossPackages.Count -gt 0) {
-        $Messageboxbody += "`nUninstalling WSL2 and/or a WSL distro permanently deletes that distro's filesystem and all data inside it - this cannot be undone."
+        $Messageboxbody += "`n`nUninstalling WSL2 and/or a WSL distro permanently deletes that distro's filesystem and all data inside it - this cannot be undone."
     }
 
-    $confirm = Show-WinUtilMessage -Message $Messageboxbody -Title $MessageboxTitle -Button $ButtonType -Icon $MessageIcon
+    # A native System.Windows.MessageBox (Show-WinUtilMessage) has no way to actually render
+    # aligned columns - it uses a proportional font, so an earlier version of this that tried to
+    # fake a Name/Description table via Select-Object/Out-String just produced misaligned,
+    # unprofessional-looking plain text no matter what the underlying data was. Show-CustomDialog
+    # (already used for About/Sponsors) renders each app as a real row instead - bold name,
+    # wrapped description underneath - and now supports Yes/No, matching Show-WinUtilMessage's
+    # own "Yes"/"No" return convention. Catalog entries use "content"/"description", not
+    # "Name"/"Description" - calculated properties pull from the correct source fields while
+    # still giving Show-CustomDialog's -Items the Name/Description shape it expects.
+    $uninstallItems = $PackagesToUninstall | Select-Object @{Name='Name'; Expression={$_.content}}, @{Name='Description'; Expression={$_.description}}
+
+    $confirm = Show-CustomDialog -Title $MessageboxTitle -Message $Messageboxbody -Items $uninstallItems -Buttons YesNo -Width 480 -Height 450 -EnableScroll $true
 
     if($confirm -eq "No") {return}
 

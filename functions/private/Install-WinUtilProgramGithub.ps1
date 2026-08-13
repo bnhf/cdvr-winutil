@@ -113,40 +113,24 @@ Function Install-WinUtilProgramGithub {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
                 # Stop a previous run of this exact install first, so a reinstall/update isn't
-                # blocked by the old file being locked open. Explicit -Id/foreach, not a
-                # Get-Process | Stop-Process pipeline (or -InputObject, which is strongly typed
-                # to [System.Diagnostics.Process[]] on the real cmdlet and can't be satisfied by
-                # a test double) - matches the pattern Start-WinUtilProcessAsStandardUserNoWait's
-                # own process lookup already uses.
-                #
-                # Matches by process NAME too (the file currently on disk, plus the incoming
-                # asset's own name), not just install-folder Path - confirmed live for Pluto for
-                # Channels (a large single-file bundle, the standard shape for a PyInstaller
-                # "onefile" build) that Path alone can miss a still-running instance, which then
-                # blocked the file replace below with no clear error.
-                $existingNames = @()
-                if (Test-Path $installDir) {
-                    $existingNames = @(Get-ChildItem -Path $installDir -ErrorAction SilentlyContinue |
-                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
-                }
-                $runningNames = @($existingNames + [IO.Path]::GetFileNameWithoutExtension($asset.name) | Select-Object -Unique)
-
-                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $matchesInstallDir = $false
-                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $matchesInstallDir -or ($runningNames -contains $_.Name)
-                })
-                foreach ($runningInstance in $runningInstances) {
-                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
-                }
-
-                # A just-stopped process doesn't always release its file handles instantly -
-                # give it a moment before the Move-Item below, rather than racing it.
-                if ($runningInstances.Count -gt 0) {
-                    $deadline = (Get-Date).AddSeconds(5)
-                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
-                        Start-Sleep -Milliseconds 250
-                    }
+                # blocked by the old file being locked open. Via taskkill /IM /T, not Get-Process/
+                # Stop-Process - two PowerShell-side matching approaches (Path alone, then
+                # Path-or-Name) were both confirmed live to still miss Pluto for Channels' actual
+                # running process (a large single-file bundle, the standard shape for a
+                # PyInstaller "onefile" build). Get-Process's Path/Name properties both depend on
+                # reading another process's MainModule info, which can silently fail across the
+                # integrity-level boundary between WinUtil's own elevated process and this app's
+                # de-elevated one. taskkill operates purely on the OS process table by image name
+                # (which the catalog's own assetPattern already provides, wildcard and all) and
+                # terminates synchronously, without needing to read the target's module info at
+                # all - the same tool Streaming Library Manager's own upstream install script
+                # already relies on for this exact purpose. /T also terminates any child
+                # processes, covering a self-extracted app that re-execs as one.
+                if ($assetPattern) {
+                    & taskkill /F /IM $assetPattern /T 2>$null | Out-Null
+                    # A brief fixed pause, not a poll - taskkill's own termination is synchronous,
+                    # but the OS can lag slightly releasing a just-killed process's file handles.
+                    Start-Sleep -Milliseconds 500
                 }
 
                 New-Item -ItemType Directory -Path $installDir -Force | Out-Null

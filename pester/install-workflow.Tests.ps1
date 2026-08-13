@@ -16,6 +16,9 @@ BeforeAll {
     function Show-WinUtilMessage {
         param($Message, $Title, $Button, $Icon)
     }
+    function Show-CustomDialog {
+        param($Title, $Message, $Items, $Buttons, $Width, $Height, $EnableScroll)
+    }
     function Show-WinUtilPromptDialog {
         param($Title, $Message, $Prompts)
     }
@@ -598,7 +601,8 @@ Describe "Invoke-WPFUnInstall entrypoint" {
         $script:capturedUninstallScriptBlock = $null
         $script:capturedUninstallParameterList = $null
 
-        Mock Show-WinUtilMessage { "Yes" }
+        Mock Show-WinUtilMessage { "OK" }
+        Mock Show-CustomDialog { "Yes" }
         Mock Invoke-WPFRunspace {
             $script:capturedUninstallScriptBlock = $ScriptBlock
             $script:capturedUninstallParameterList = $ParameterList
@@ -623,7 +627,7 @@ Describe "Invoke-WPFUnInstall entrypoint" {
     }
 
     It "does not show the progress bar when uninstall is declined" {
-        Mock Show-WinUtilMessage { "No" } -ParameterFilter { $Title -eq "Are you sure?" }
+        Mock Show-CustomDialog { "No" } -ParameterFilter { $Title -eq "Are you sure?" }
 
         Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
 
@@ -633,19 +637,21 @@ Describe "Invoke-WPFUnInstall entrypoint" {
     It "confirms and queues selected packages with the configured package manager preference" {
         Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
 
-        Should -Invoke -CommandName Show-WinUtilMessage -Times 1 -Exactly -ParameterFilter {
-            # Regression guard for a real production bug: the confirmation dialog selected
-            # "Name"/"Description" - fields that don't exist on real catalog objects (only
-            # "content"/"description" do) - leaving the Name column blank for every app
-            # regardless of selection. Checking for the package's own description text here
-            # (not just "Git", which could coincidentally appear elsewhere) proves the fix
-            # actually pulls from the correct source properties.
+        Should -Invoke -CommandName Show-CustomDialog -Times 1 -Exactly -ParameterFilter {
+            # Regression guard for two real production bugs: first, the confirmation dialog
+            # selected "Name"/"Description" - fields that don't exist on real catalog objects
+            # (only "content"/"description" do) - leaving the Name column blank for every app
+            # regardless of selection. Second, even after that fix, the plain-text "table" it
+            # built via Select-Object/Out-String never actually lined up in a real MessageBox,
+            # which uses a proportional font, not a monospaced one - Show-CustomDialog's -Items
+            # renders real rows instead, so this checks the item data itself (not string
+            # formatting) reaches it correctly.
             $Message -like "*This will uninstall the following applications:*" -and
-                $Message -like "*Git*" -and
-                $Message -like "*Git package*" -and
                 $Title -eq "Are you sure?" -and
-                "$Button" -eq "YesNo" -and
-                "$Icon" -eq "Information"
+                $Buttons -eq "YesNo" -and
+                @($Items).Count -eq 1 -and
+                @($Items)[0].Name -eq "Git" -and
+                @($Items)[0].Description -eq "Git package"
         }
         Should -Invoke -CommandName Invoke-WPFRunspace -Times 1 -Exactly -ParameterFilter {
             $ScriptBlock -is [scriptblock] -and
@@ -689,7 +695,7 @@ Describe "Invoke-WPFUnInstall entrypoint" {
     }
 
     It "exits without queueing uninstall when confirmation is declined" {
-        Mock Show-WinUtilMessage { "No" } -ParameterFilter { $Title -eq "Are you sure?" }
+        Mock Show-CustomDialog { "No" } -ParameterFilter { $Title -eq "Are you sure?" }
 
         Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
 
@@ -703,7 +709,7 @@ Describe "Invoke-WPFUnInstall runspace body" {
         New-WinUtilInstallTestContext -Packages @($script:package)
         $script:capturedUninstallScriptBlock = $null
 
-        Mock Show-WinUtilMessage { "Yes" }
+        Mock Show-CustomDialog { "Yes" }
         Mock Invoke-WPFRunspace {
             $script:capturedUninstallScriptBlock = $ScriptBlock
             [pscustomobject]@{ MockHandle = $true }

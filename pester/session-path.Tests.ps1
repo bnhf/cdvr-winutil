@@ -56,6 +56,52 @@ Describe "Install-WinUtilProgramNpm PATH refresh" {
     }
 }
 
+Describe "Install-WinUtilProgramNpm --allow-scripts" {
+    BeforeEach {
+        Mock Write-WinUtilLog { }
+        Mock Update-WinUtilSessionPath { }
+        Mock Get-Command { [pscustomobject]@{ Name = "npm" } } -ParameterFilter { $Name -eq "npm" }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+    }
+
+    It "passes --allow-scripts through for a package that declares npmAllowScripts" {
+        # Regression guard for the actual reported bug: npm silently skips a dependency's own
+        # install/postinstall script unless explicitly allowlisted - confirmed live for
+        # Prismcast, whose ffmpeg-for-homebridge dependency needs its install.js to actually
+        # fetch the bundled ffmpeg binary Prismcast depends on, only logged as an npm warning
+        # rather than a failure, so nothing about the install itself signaled anything was wrong.
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast"; npmAllowScripts = "ffmpeg-for-homebridge" }
+
+        Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            (@($ArgumentList) -join "|") -eq "/c|npm|install|-g|prismcast|--allow-scripts=ffmpeg-for-homebridge"
+        }
+    }
+
+    It "does not pass --allow-scripts for a package that doesn't declare it" {
+        # Deliberately per-package, not a blanket allow for every npm-type install - most npm
+        # packages have no declared need to bypass npm's own default-deny script protection.
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
+
+        Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            (@($ArgumentList) -join "|") -eq "/c|npm|install|-g|prismcast"
+        }
+    }
+
+    It "does not pass --allow-scripts on uninstall, even when the package declares it" {
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast"; npmAllowScripts = "ffmpeg-for-homebridge" }
+
+        Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg)
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            (@($ArgumentList) -join "|") -eq "/c|npm|uninstall|-g|prismcast"
+        }
+    }
+}
+
 Describe "Test-WinUtilNpmPackageInstalled PATH refresh" {
     It "refreshes PATH unconditionally before checking whether npm is available" {
         # Same wiring as Install-WinUtilProgramNpm above - "Show Installed Apps" can run in the
