@@ -18,9 +18,12 @@ BeforeAll {
     }
     function Test-WinUtilWSLFeatureEnabled { $true }
     function Test-WinUtilWSLDistroInstalled { param($Distro) $true }
+    function Test-WinUtilWSLCommandInstalled { param($Distro, $InstallCheckCommand) $false }
     function Set-WinUtilNoBomFileContent { param($Path, $Value) }
     function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
     function Get-WinUtilLanIPAddress { "192.168.1.50" }
+    function Invoke-WPFUIThread { param([scriptblock]$ScriptBlock) }
+    function Show-WinUtilMessage { param($Message, $Title, $Button, $Icon) }
 }
 
 Describe "Install-WinUtilFeatureWSL" {
@@ -136,6 +139,9 @@ Describe "Install-WinUtilWSLCommand" {
         Mock Set-WinUtilNoBomFileContent { }
         Mock Remove-Item { }
         Mock Get-WinUtilLanIPAddress { "192.168.1.50" }
+        Mock Test-WinUtilWSLCommandInstalled { $false }
+        Mock Invoke-WPFUIThread { param([scriptblock]$ScriptBlock) & $ScriptBlock }
+        Mock Show-WinUtilMessage { }
     }
 
     It "substitutes {{LAN_IP}} with the detected LAN address" {
@@ -271,6 +277,66 @@ Describe "Install-WinUtilWSLCommand" {
 
         Should -Invoke -CommandName Test-WinUtilDockerAvailableInWSL -Times 0 -Exactly
         Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -eq "Olivetin uninstall completed." }
+    }
+
+    It "shows an upgrade-instructions dialog and skips re-running install when the package is already installed" {
+        # Regression guard for a real bug: re-running Olivetin's install command a second time
+        # fails outright (its bootstrap container's name is already taken by the first install's
+        # stopped-but-not-removed container) - Olivetin/Portainer are meant to be upgraded
+        # through Portainer's own UI anyway, so this replaces the doomed re-run with a dialog.
+        Mock Test-WinUtilWSLCommandInstalled { $true }
+
+        $package = [pscustomobject]@{
+            Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run hello"
+            installCheckCommand = "docker inspect olivetin"; upgradeInstructions = "Use Portainer at http://localhost:9000 to upgrade."
+        }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName wsl -Times 0 -Exactly
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 1 -Exactly -ParameterFilter {
+            $Message -eq "Use Portainer at http://localhost:9000 to upgrade." -and $Title -eq "Olivetin is already installed"
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "WARN" -and $Message -like "Olivetin is already installed - not re-running install.*"
+        }
+    }
+
+    It "installs normally when the package declares upgradeInstructions but isn't installed yet" {
+        Mock Test-WinUtilWSLCommandInstalled { $false }
+
+        $package = [pscustomobject]@{
+            Key = "olivetin"; content = "Olivetin"; distro = "Debian"; command = "docker run hello"
+            installCheckCommand = "docker inspect olivetin"; upgradeInstructions = "Use Portainer to upgrade."
+        }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName wsl -Times 1 -Exactly
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 0 -Exactly
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Message -eq "Olivetin install completed." }
+    }
+
+    It "installs normally when the package has no upgradeInstructions, regardless of installed state" {
+        Mock Test-WinUtilWSLCommandInstalled { $true }
+
+        $package = [pscustomobject]@{ Key = "somepkg"; content = "SomePkg"; distro = "Debian"; command = "docker run hello" }
+        Install-WinUtilWSLCommand -Action Install -Packages @($package)
+
+        Should -Invoke -CommandName wsl -Times 1 -Exactly
+        Should -Invoke -CommandName Test-WinUtilWSLCommandInstalled -Times 0 -Exactly
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 0 -Exactly
+    }
+
+    It "does not show the upgrade-instructions dialog for Uninstall" {
+        Mock Test-WinUtilWSLCommandInstalled { $true }
+
+        $package = [pscustomobject]@{
+            Key = "olivetin"; content = "Olivetin"; distro = "Debian"; uninstallCommand = "docker rm -f olivetin"
+            installCheckCommand = "docker inspect olivetin"; upgradeInstructions = "Use Portainer to upgrade."
+        }
+        Install-WinUtilWSLCommand -Action Uninstall -Packages @($package)
+
+        Should -Invoke -CommandName wsl -Times 1 -Exactly
+        Should -Invoke -CommandName Show-WinUtilMessage -Times 0 -Exactly
     }
 }
 

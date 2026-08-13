@@ -274,6 +274,17 @@ Describe "Olivetin application config" {
         $uninstallCommand | Should -Match "docker volume rm portainer_data"
         $uninstallCommand | Should -Match "docker rmi"
     }
+
+    It "declares upgradeInstructions pointing at Portainer, matching its installCheckCommand" {
+        # Re-running the install command a second time fails (see the "only stops olivetin-
+        # ezstart..." test above - the bootstrap container's name is already taken), and
+        # Olivetin/Portainer are meant to be upgraded through Portainer's own UI, not this tool -
+        # Install-WinUtilWSLCommand.ps1 only shows that dialog instead of re-running when both
+        # fields are present, so a future edit dropping one silently disables the guard.
+        $script:olivetin.installCheckCommand | Should -Not -BeNullOrEmpty
+        $script:olivetin.upgradeInstructions | Should -Match "Portainer"
+        $script:olivetin.upgradeInstructions | Should -Match "9000"
+    }
 }
 
 Describe "App navigation config" {

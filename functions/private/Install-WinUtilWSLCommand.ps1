@@ -68,6 +68,17 @@ Function Install-WinUtilWSLCommand {
         running - unlike the direct-download installers, this already reports live progress
         during a long run via -OnWaiting above, so the callback here only needs to cover the gap
         before that first fires (up to OnWaitingIntervalSeconds after starting).
+
+        If the package declares upgradeInstructions, Install checks whether it's already
+        installed (via installCheckCommand, same signal "Show Installed Apps" uses) before
+        running the command at all, and shows a dialog with those instructions instead of
+        re-running it if so - for packages whose install command can't safely run a second time.
+        Olivetin is the confirmed case: its EZ-Start bootstrap container is only ever stopped
+        (never removed) once the real olivetin container is confirmed up, so a second "docker
+        run --name olivetin-ezstart" hits Docker's "name already in use" and the whole install
+        fails - and Olivetin/Portainer are meant to be upgraded through Portainer's own UI
+        anyway, not by re-running this. Only meaningful for Install - Uninstall should proceed
+        normally regardless.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -96,6 +107,16 @@ Function Install-WinUtilWSLCommand {
                 Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name has no uninstallCommand defined - not uninstalled. Remove it manually if needed."
             } else {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "WSL command install for $name is missing distro/command."
+            }
+            continue
+        }
+
+        if ($Action -eq "Install" -and -not [string]::IsNullOrWhiteSpace($package.upgradeInstructions) -and
+            -not [string]::IsNullOrWhiteSpace($package.installCheckCommand) -and
+            (Test-WinUtilWSLCommandInstalled -Distro $distro -InstallCheckCommand $package.installCheckCommand)) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name is already installed - not re-running install. $($package.upgradeInstructions)"
+            Invoke-WPFUIThread -ScriptBlock {
+                Show-WinUtilMessage -Message $package.upgradeInstructions -Title "$name is already installed" -Button "OK" -Icon "Information"
             }
             continue
         }

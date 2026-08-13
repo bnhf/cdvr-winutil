@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.0942
+    Version        : v2026.08.13.1019
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.0942"
+$sync.version = "v2026.08.13.1019"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2254,6 +2254,17 @@ Function Install-WinUtilWSLCommand {
         running - unlike the direct-download installers, this already reports live progress
         during a long run via -OnWaiting above, so the callback here only needs to cover the gap
         before that first fires (up to OnWaitingIntervalSeconds after starting).
+
+        If the package declares upgradeInstructions, Install checks whether it's already
+        installed (via installCheckCommand, same signal "Show Installed Apps" uses) before
+        running the command at all, and shows a dialog with those instructions instead of
+        re-running it if so - for packages whose install command can't safely run a second time.
+        Olivetin is the confirmed case: its EZ-Start bootstrap container is only ever stopped
+        (never removed) once the real olivetin container is confirmed up, so a second "docker
+        run --name olivetin-ezstart" hits Docker's "name already in use" and the whole install
+        fails - and Olivetin/Portainer are meant to be upgraded through Portainer's own UI
+        anyway, not by re-running this. Only meaningful for Install - Uninstall should proceed
+        normally regardless.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -2282,6 +2293,16 @@ Function Install-WinUtilWSLCommand {
                 Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name has no uninstallCommand defined - not uninstalled. Remove it manually if needed."
             } else {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "WSL command install for $name is missing distro/command."
+            }
+            continue
+        }
+
+        if ($Action -eq "Install" -and -not [string]::IsNullOrWhiteSpace($package.upgradeInstructions) -and
+            -not [string]::IsNullOrWhiteSpace($package.installCheckCommand) -and
+            (Test-WinUtilWSLCommandInstalled -Distro $distro -InstallCheckCommand $package.installCheckCommand)) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name is already installed - not re-running install. $($package.upgradeInstructions)"
+            Invoke-WPFUIThread -ScriptBlock {
+                Show-WinUtilMessage -Message $package.upgradeInstructions -Title "$name is already installed" -Button "OK" -Icon "Information"
             }
             continue
         }
@@ -10572,6 +10593,7 @@ $sync.configs.applications = @'
     "command": "docker run -d --name olivetin-ezstart --pull always --add-host=host.docker.internal:host-gateway -p 1338:1337 -e EZ_START=-ezstart -e CHANNELS_DVR={{LAN_IP}}:8089 -e TZ=$(readlink /etc/localtime) -e HOST_DIR=$([[ \"$(uname)\" == \"Darwin\" ]] && echo \"$HOME\" || echo \"/data\") -e PORTAINER_PASSWORD='{{PORTAINER_PASSWORD}}' -v /config -v /var/run/docker.sock:/var/run/docker.sock bnhf/olivetin:latest\nrun_exit=$?\nif [ \"$run_exit\" -ne 0 ]; then\n  exit \"$run_exit\"\nfi\nstarted=0\nfor i in $(seq 1 60); do\n  if [ -n \"$(docker ps -q --filter 'name=^/olivetin$' --filter 'status=running')\" ]; then\n    docker stop olivetin-ezstart\n    started=1\n    break\n  fi\n  sleep 3\ndone\nif [ \"$started\" -eq 0 ]; then\n  echo \"olivetin container did not start within the expected time - leaving olivetin-ezstart running so its logs are still available for troubleshooting.\"\n  exit 1\nfi",
     "uninstallCommand": "images=()\nfor c in olivetin portainer olivetin-ezstart; do\n  img=$(docker inspect -f '{{.Config.Image}}' \"$c\" 2>/dev/null)\n  if [ -n \"$img\" ]; then\n    images+=(\"$img\")\n  fi\ndone\ndocker rm -f olivetin-ezstart olivetin portainer 2>/dev/null\ndocker volume rm portainer_data 2>/dev/null\nfor img in \"${images[@]}\"; do\n  docker rmi \"$img\" 2>/dev/null\ndone\ntrue",
     "installCheckCommand": "docker inspect olivetin",
+    "upgradeInstructions": "OliveTin and Portainer update themselves through Portainer, not through this tool - re-running the EZ-Start install command here would just fail (its bootstrap container's name is already taken by the first install). Open Portainer at http://localhost:9000 (or https://localhost:9443) and use its own recreate/pull-latest-image option on the olivetin and portainer containers.",
     "foss": false
   },
   "WPFInstallstreamlinkmanager": {
