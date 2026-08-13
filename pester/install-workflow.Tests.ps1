@@ -69,6 +69,9 @@ BeforeAll {
     function Uninstall-WinUtilProgramDirect {
         param($Packages, $ProgressCallback)
     }
+    function Uninstall-WinUtilProgramGithub {
+        param($Packages, $ProgressCallback)
+    }
     function Uninstall-WinUtilStreamLinkManager {
         param($Packages, $ProgressCallback)
     }
@@ -687,6 +690,7 @@ Describe "Invoke-WPFUnInstall runspace body" {
         Mock Install-WinUtilProgramNpm { }
         Mock Install-WinUtilWSLCommand { }
         Mock Uninstall-WinUtilProgramDirect { }
+        Mock Uninstall-WinUtilProgramGithub { }
         Mock Uninstall-WinUtilStreamLinkManager { }
         Mock Uninstall-WinUtilWSLDistro { }
         Mock Uninstall-WinUtilFeatureWSL { }
@@ -779,6 +783,27 @@ Describe "Invoke-WPFUnInstall runspace body" {
 
         Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
             $Visible -eq $true -and $Label -eq "Uninstalling AppA..."
+        }
+    }
+
+    It "attempts a github-install package via Uninstall-WinUtilProgramGithub instead of routing it straight to unsupported" {
+        # Regression guard: every github-type package used to be unconditionally added to the
+        # "unsupported" list with no attempt at all - now that Uninstall-WinUtilProgramGithub
+        # can look up a registered Windows uninstaller by DisplayName, every selected one should
+        # actually be tried instead of being written off upfront.
+        $pkg = [pscustomobject]@{ content = "Clicker" }
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Github @($pkg)
+        }
+
+        Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
+        & $script:capturedUninstallScriptBlock -PackagesToUninstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Uninstall-WinUtilProgramGithub -Times 1 -Exactly -ParameterFilter {
+            @($Packages).Count -eq 1 -and $Packages[0].content -eq "Clicker"
+        }
+        Should -Invoke -CommandName Invoke-WPFUIThread -Times 0 -Exactly -ParameterFilter {
+            $ScriptBlock.ToString() -like '*Some apps were skipped*'
         }
     }
 

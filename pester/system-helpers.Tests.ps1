@@ -22,6 +22,8 @@ BeforeAll {
     function Test-WinUtilWSLDistroInstalled { param($Distro) $false }
     function Test-WinUtilWSLCommandInstalled { param($Distro, $InstallCheckCommand) $false }
     function Test-WinUtilWebUIReachable { param($Url) $false }
+    function Get-WinUtilProgramUninstallString { param($DisplayNamePattern) [pscustomobject]@{ UninstallString = $null; Reason = "not found" } }
+    function Test-WinUtilNpmPackageInstalled { param($NpmPackage) $false }
     function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
     function Write-WinUtilLog { }
 }
@@ -165,10 +167,11 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
         $script:sync = [Hashtable]::Synchronized(@{
             configs = [pscustomobject]@{
                 applicationsHashtable = @{
-                    WPFInstallchannelsdvr = [pscustomobject]@{ installType = "direct"; webui = "http://localhost:8089" }
-                    WPFInstallrustdvr = [pscustomobject]@{ installType = "github"; webui = $null }
+                    WPFInstallchannelsdvr = [pscustomobject]@{ installType = "direct"; content = "Channels DVR"; webui = "http://localhost:8089" }
+                    WPFInstallrustdvr = [pscustomobject]@{ installType = "github"; content = "Clicker"; webui = $null }
                     WPFInstallolivetin = [pscustomobject]@{ installType = "wslCommand"; distro = "Debian"; installCheckCommand = "docker inspect olivetin-ezstart" }
                     WPFInstallstreamlinkmanager = [pscustomobject]@{ installType = "streamLinkManager" }
+                    WPFInstallprismcast = [pscustomobject]@{ installType = "npm"; content = "Prismcast"; npmPackage = "prismcast" }
                 }
             }
         })
@@ -192,7 +195,7 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
         Should -Invoke -CommandName Test-WinUtilWebUIReachable -Times 1 -Exactly -ParameterFilter { $Url -eq "http://localhost:8089" }
     }
 
-    It "does not report a direct-install package as installed when its webui isn't reachable" {
+    It "does not report a direct-install package as installed when neither webui nor Add/Remove Programs match" {
         Mock Test-WinUtilWebUIReachable { $false }
 
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
@@ -200,13 +203,26 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
         $result | Should -Not -Contain "WPFInstallchannelsdvr"
     }
 
-    It "leaves a github-install package undetected when it has no webui declared" {
-        Mock Test-WinUtilWebUIReachable { $true }
+    It "detects a github-install package via Add/Remove Programs even when it has no webui declared" {
+        # Regression guard for a real production bug: this used to be webui-only, so a
+        # github-install package without one (Clicker, and 3 of the other 5 github entries in
+        # the real catalog) could never be detected as installed no matter what was actually on
+        # disk - confirmed live, Clicker registers a normal Windows uninstaller, so the same
+        # Add/Remove Programs lookup Uninstall-WinUtilProgramGithub uses to uninstall it works
+        # here too, as a second, independent signal alongside webui.
+        Mock Get-WinUtilProgramUninstallString {
+            [pscustomobject]@{ UninstallString = '"C:\Program Files\Clicker\unins000.exe"'; Reason = $null }
+        } -ParameterFilter { $DisplayNamePattern -eq "*Clicker*" }
 
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
 
+        $result | Should -Contain "WPFInstallrustdvr"
+    }
+
+    It "does not report a github-install package as installed when neither webui nor Add/Remove Programs match" {
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
         $result | Should -Not -Contain "WPFInstallrustdvr"
-        Should -Invoke -CommandName Test-WinUtilWebUIReachable -Times 0 -Exactly -ParameterFilter { $Url -eq $null }
     }
 
     It "detects a wslCommand package via its installCheckCommand" {
@@ -225,6 +241,25 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
 
         $result | Should -Not -Contain "WPFInstallolivetin"
+    }
+
+    It "detects an npm package via 'npm list -g'" {
+        # Regression guard: this installType had no case at all - Prismcast (currently the only
+        # npm-type entry) could never be shown as installed by "Show Installed Apps", the same
+        # class of gap "direct"/"github" had before their own fix.
+        Mock Test-WinUtilNpmPackageInstalled { $true } -ParameterFilter { $NpmPackage -eq "prismcast" }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Contain "WPFInstallprismcast"
+    }
+
+    It "does not report an npm package as installed when 'npm list -g' doesn't find it" {
+        Mock Test-WinUtilNpmPackageInstalled { $false }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Not -Contain "WPFInstallprismcast"
     }
 
     It "detects a streamLinkManager package via its fixed install path" {

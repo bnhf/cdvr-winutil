@@ -145,7 +145,7 @@
         "description": "Olivetin for Channels, run via docker inside the Debian WSL distro. Requires Docker Desktop with WSL integration enabled for Debian.",
         "link": "https://github.com/bnhf/OliveTin",
         "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
-        "webui": "http://localhost:1338",
+        "webui": "http://localhost:1337",
         "handle": "@bnhf",
         "installType": "wslCommand",
         "distro": "Debian",

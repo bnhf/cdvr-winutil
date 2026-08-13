@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1047
+    Version        : v2026.08.13.1126
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1047"
+$sync.version = "v2026.08.13.1126"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -765,7 +765,13 @@ function Get-WinUtilPackageLogSummary {
 
     @($Packages | ForEach-Object {
         $package = $_
-        $packageName = @($package.Name, $package.Description, $package.winget, $package.choco) |
+        # "content" is the catalog's actual display-name field (config/applications.json has no
+        # "Name" property on any entry) - confirmed live: with "Name" checked first and falling
+        # through to "Description" once that's never found, every install/uninstall summary line
+        # showed the app's full description instead of its name (e.g. "Native Win32 client for
+        # Channels DVR written in Rust with WinUI3 styling, by mackid1993..." instead of
+        # "Clicker"), for every app, not just ones missing a winget/choco id.
+        $packageName = @($package.content, $package.Name, $package.Description, $package.winget, $package.choco) |
             Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and $_ -ne "na" } |
             Select-Object -First 1
 
@@ -869,6 +875,60 @@ function Get-WinUtilPackagesInDependencyOrder {
     foreach ($p in $remaining) { $sorted.Add($p) }
 
     return ,$sorted.ToArray()
+}
+
+function Get-WinUtilProgramUninstallString {
+    <#
+    .SYNOPSIS
+        Looks up a program's registered uninstall command from Windows' own Add/Remove Programs
+        registry, by DisplayName wildcard match - for packages with no known winget/choco id, so
+        there's nothing for winget/choco to uninstall by ID, but whose installer registers a
+        normal Windows uninstaller anyway (most standard installer frameworks - Inno Setup, NSIS,
+        WiX/MSI - do this automatically; confirmed for Clicker specifically via its own repo
+        docs: "the installer registers an uninstaller").
+
+    .DESCRIPTION
+        Scans the per-machine Uninstall key in both its 64-bit and 32-bit (WOW6432Node) views,
+        plus the per-user one, since a program can register in whichever matches its install
+        scope. Requires EXACTLY one match - zero means nothing is registered under that name
+        (already uninstalled, or this particular app doesn't self-register, in which case the
+        caller has no way to uninstall it here), and more than one is ambiguous enough that
+        guessing could run the wrong program's uninstaller, so this refuses to pick either way
+        rather than risk that.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayNamePattern
+    )
+
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    try {
+        $candidates = @(Get-ItemProperty -Path $uninstallPaths -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like $DisplayNamePattern -and -not [string]::IsNullOrWhiteSpace($_.UninstallString) })
+
+        if ($candidates.Count -eq 0) {
+            return [pscustomobject]@{
+                UninstallString = $null
+                Reason = "No program matching '$DisplayNamePattern' found in Windows' Add/Remove Programs list - it may already be uninstalled, or this app doesn't register a standard uninstaller."
+            }
+        }
+
+        if ($candidates.Count -gt 1) {
+            return [pscustomobject]@{
+                UninstallString = $null
+                Reason = "Found $($candidates.Count) programs matching '$DisplayNamePattern' in Add/Remove Programs - not guessing which one to uninstall."
+            }
+        }
+
+        return [pscustomobject]@{ UninstallString = $candidates[0].UninstallString; Reason = $null }
+    } catch {
+        return [pscustomobject]@{ UninstallString = $null; Reason = "Failed to query Add/Remove Programs: $_" }
+    }
 }
 
 function Get-WinUtilSelectedPackages {
@@ -2797,11 +2857,28 @@ Function Invoke-WinUtilCurrentSystem {
                     }
                 }
                 { $_ -eq "direct" -or $_ -eq "github" } {
-                    # No winget/choco/WSL-based signal exists for these - fall back to probing
-                    # the catalog's own "webui" URL (already used for the app's "Open" button)
-                    # when one is declared. Entries with neither (e.g. Clicker) can't be detected
-                    # this way and are left unchecked, same as before this fix.
-                    if ($entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)) {
+                    # No winget/choco/WSL-based signal exists for these. Two independent checks,
+                    # either one is enough: the catalog's own "webui" URL (already used for the
+                    # app's "Open" button) when declared, and - confirmed live for Clicker via
+                    # its own repo docs ("the installer registers an uninstaller") - a matching
+                    # entry in Windows' Add/Remove Programs registry, the same lookup
+                    # Uninstall-WinUtilProgramGithub already relies on to actually uninstall
+                    # these. Regression guard: this used to be webui-only, so any github-type
+                    # entry without one (4 of the 6 currently in the catalog, including Clicker)
+                    # could never be detected as installed no matter what was actually on disk.
+                    $reachableViaWebui = $entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)
+                    $foundInAddRemovePrograms = -not [string]::IsNullOrWhiteSpace(
+                        (Get-WinUtilProgramUninstallString -DisplayNamePattern "*$($entry.Value.content)*").UninstallString
+                    )
+                    if ($reachableViaWebui -or $foundInAddRemovePrograms) {
+                        Write-Output $entry.Key
+                    }
+                }
+                "npm" {
+                    # Regression guard: this installType had no detection case at all - Prismcast
+                    # (currently the only npm-type entry) could never be shown as installed by
+                    # "Show Installed Apps", the same class of gap "direct"/"github" had.
+                    if ($entry.Value.npmPackage -and (Test-WinUtilNpmPackageInstalled -NpmPackage $entry.Value.npmPackage)) {
                         Write-Output $entry.Key
                     }
                 }
@@ -6838,6 +6915,34 @@ function Test-WinUtilDockerAvailableInWSL {
     return [pscustomobject]@{ Available = $true; Reason = $null }
 }
 
+function Test-WinUtilNpmPackageInstalled {
+    <#
+    .SYNOPSIS
+        Returns $true if a global npm package is installed - used by "Show Installed Apps" for
+        installType "npm" packages (e.g. Prismcast), which have no winget/choco id to look up.
+
+    .DESCRIPTION
+        "npm list -g <package> --depth=0" exits 0 (and lists it) when installed, non-zero when
+        it isn't - the standard npm-native way to check, rather than assuming every npm package
+        exposes some particular binary/file on disk that would need per-package knowledge.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$NpmPackage
+    )
+
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    try {
+        & npm list -g $NpmPackage --depth=0 2>&1 | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
 function Test-WinUtilPackageManager {
     <#
 
@@ -7325,6 +7430,72 @@ Function Uninstall-WinUtilProgramDirect {
         }
 
         Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name has no uninstallCommand or uninstallViaInstaller defined - not uninstalled."
+    }
+}
+
+Function Uninstall-WinUtilProgramGithub {
+    <#
+    .SYNOPSIS
+        Uninstalls a "github" install-type package via its own registered Windows uninstaller,
+        looked up from the Add/Remove Programs registry by DisplayName - see
+        Get-WinUtilProgramUninstallString.ps1 for why this works without a winget/choco id or a
+        declared uninstallCommand.
+
+    .DESCRIPTION
+        De-elevated and run fire-and-forget, the same way and for the same reason as
+        Uninstall-WinUtilProgramDirect's uninstallViaInstaller branch - the uninstaller is
+        typically interactive (a confirmation prompt at minimum), so this launches it and moves
+        on rather than waiting on it to close.
+
+        The registered UninstallString is run via "cmd.exe /c", not parsed and split into a
+        FilePath/ArgumentList pair - it can be a plain quoted exe path, an exe plus extra
+        arguments, or an MsiExec.exe /X{GUID} reference, and cmd's own parsing handles all of
+        those correctly without needing to know which shape a given installer used, the same
+        way Windows' own "Add or Remove Programs" UI runs this value.
+
+        Matches by DisplayName wildcard on the catalog's own "content" field (e.g. "*Clicker*")
+        - no separate JSON field needed, since this only depends on what the installer itself
+        registered, not anything WinUtil's catalog controls. Confirmed for Clicker specifically
+        via its own repo docs: "the installer registers an uninstaller; nothing has to be
+        deleted by hand."
+
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
+    )
+
+    foreach ($package in $Packages) {
+        $name = $package.content
+
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "GitHub uninstall is missing content (display name) to look up."
+            continue
+        }
+
+        Write-WinUtilLog -Component "Package" -Message "Looking up $name in Add/Remove Programs"
+        if ($ProgressCallback) { try { & $ProgressCallback "Looking up $name..." } catch {} }
+
+        $lookup = Get-WinUtilProgramUninstallString -DisplayNamePattern "*$name*"
+        if ([string]::IsNullOrWhiteSpace($lookup.UninstallString)) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Could not uninstall ${name}: $($lookup.Reason)"
+            continue
+        }
+
+        Write-WinUtilLog -Component "Package" -Message "Launching $name's uninstaller - it may ask you to confirm. WinUtil will not wait for it to close."
+        if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
+        try {
+            if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "cmd.exe" -ArgumentList @("/c", $lookup.UninstallString))) {
+                $proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $lookup.UninstallString) -PassThru
+                Set-WinUtilProcessForeground -Process $proc
+            }
+        } catch {
+            Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to launch uninstaller for ${name}: $_"
+        }
     }
 }
 
@@ -9990,8 +10161,12 @@ function Invoke-WPFUnInstall {
         $packagesStreamLinkManager = $packagesSorted['StreamLinkManager']
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
-        # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
-        # github (arbitrary third-party installers with no known uninstaller).
+        # declared uninstallCommand (or, for direct, no uninstallViaInstaller either). Github
+        # packages aren't split this way - whether one can be uninstalled depends on a registry
+        # lookup at runtime (does its installer register a normal Windows uninstaller?), not a
+        # static catalog field, so every selected one is attempted via
+        # Uninstall-WinUtilProgramGithub, which logs its own "nothing found" case instead of
+        # this being decided upfront.
         $unsupported = [System.Collections.Generic.List[string]]::new()
         $packagesDirect = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['Direct'])) {
@@ -10009,13 +10184,14 @@ function Invoke-WPFUnInstall {
                 $unsupported.Add($p.content)
             }
         }
-        foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
+        $packagesGithub = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['Github'])) { if ($p) { $packagesGithub.Add($p) } }
         $packagesWslDistro = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $packagesWslDistro.Add($p) } }
         $packagesWslFeature = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $packagesWslFeature.Add($p) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count + @($packagesWslDistro).Count + @($packagesWslFeature).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count + @($packagesWslDistro).Count + @($packagesWslFeature).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
 
@@ -10027,7 +10203,7 @@ function Invoke-WPFUnInstall {
             if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
         }
         $failedPackages = [System.Collections.Generic.List[string]]::new()
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
         # See Invoke-WPFInstall.ps1's matching comment for why this exists and what it does.
         $progressCallback = if ($hasUI) {
@@ -10097,6 +10273,7 @@ function Invoke-WPFUnInstall {
             foreach ($uninstallBucket in @(
                 @{ Packages = $packagesNpm; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
                 @{ Packages = $packagesDirect; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
                 @{ Packages = $packagesWslCommand; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
                 @{ Packages = $packagesStreamLinkManager; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {
@@ -10605,7 +10782,7 @@ $sync.configs.applications = @'
     "description": "Olivetin for Channels, run via docker inside the Debian WSL distro. Requires Docker Desktop with WSL integration enabled for Debian.",
     "link": "https://github.com/bnhf/OliveTin",
     "icon": "https://raw.githubusercontent.com/OliveTin/OliveTin/main/frontend/OliveTinLogo.png",
-    "webui": "http://localhost:1338",
+    "webui": "http://localhost:1337",
     "handle": "@bnhf",
     "installType": "wslCommand",
     "distro": "Debian",

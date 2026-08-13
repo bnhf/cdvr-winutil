@@ -58,8 +58,12 @@ function Invoke-WPFUnInstall {
         $packagesStreamLinkManager = $packagesSorted['StreamLinkManager']
 
         # Packages whose uninstall isn't automated - direct/WSL-command packages with no
-        # declared uninstallCommand (or, for direct, no uninstallViaInstaller either), plus
-        # github (arbitrary third-party installers with no known uninstaller).
+        # declared uninstallCommand (or, for direct, no uninstallViaInstaller either). Github
+        # packages aren't split this way - whether one can be uninstalled depends on a registry
+        # lookup at runtime (does its installer register a normal Windows uninstaller?), not a
+        # static catalog field, so every selected one is attempted via
+        # Uninstall-WinUtilProgramGithub, which logs its own "nothing found" case instead of
+        # this being decided upfront.
         $unsupported = [System.Collections.Generic.List[string]]::new()
         $packagesDirect = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['Direct'])) {
@@ -77,13 +81,14 @@ function Invoke-WPFUnInstall {
                 $unsupported.Add($p.content)
             }
         }
-        foreach ($p in @($packagesSorted['Github'])) { if ($p) { $unsupported.Add($p.content) } }
+        $packagesGithub = [System.Collections.Generic.List[object]]::new()
+        foreach ($p in @($packagesSorted['Github'])) { if ($p) { $packagesGithub.Add($p) } }
         $packagesWslDistro = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['WslDistro'])) { if ($p) { $packagesWslDistro.Add($p) } }
         $packagesWslFeature = [System.Collections.Generic.List[object]]::new()
         foreach ($p in @($packagesSorted['WslFeature'])) { if ($p) { $packagesWslFeature.Add($p) } }
 
-        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count + @($packagesWslDistro).Count + @($packagesWslFeature).Count))
+        $totalPackages = [Math]::Max(1, (@($packagesWinget).Count + @($packagesChoco).Count + @($packagesNpm).Count + @($packagesDirect).Count + @($packagesGithub).Count + @($packagesWslCommand).Count + @($packagesStreamLinkManager).Count + @($packagesWslDistro).Count + @($packagesWslFeature).Count))
         $completedPackages = 0
         $hasUI = $null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher
 
@@ -95,7 +100,7 @@ function Invoke-WPFUnInstall {
             if ($p.choco -and $p.choco -ne "na") { $packageNameById[$p.choco] = $p.content }
         }
         $failedPackages = [System.Collections.Generic.List[string]]::new()
-        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
+        Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
         # See Invoke-WPFInstall.ps1's matching comment for why this exists and what it does.
         $progressCallback = if ($hasUI) {
@@ -165,6 +170,7 @@ function Invoke-WPFUnInstall {
             foreach ($uninstallBucket in @(
                 @{ Packages = $packagesNpm; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
                 @{ Packages = $packagesDirect; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
                 @{ Packages = $packagesWslCommand; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
                 @{ Packages = $packagesStreamLinkManager; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {

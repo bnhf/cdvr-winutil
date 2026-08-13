@@ -179,6 +179,33 @@ Describe "Applications config" {
             throw ($invalidEntries -join "`n")
         }
     }
+
+    It "has a 'Show Installed Apps' detection case for every installType used in the catalog" {
+        # This closes a gap the "contains required display fields..." test above doesn't cover:
+        # that test only confirms an installType is *recognized* for install/routing purposes,
+        # not that "Show Installed Apps" (Invoke-WinUtilCurrentSystem.ps1) actually knows how to
+        # detect it - which is exactly how two real bugs shipped undetected: github-type
+        # detection that only worked for entries with a webui (Clicker doesn't have one), and
+        # npm-type having no detection case at all (Prismcast) - both found only when a user
+        # noticed a specific already-installed app not being checked, not by this test suite.
+        # winget/choco aren't installTypes (those apps have no "installType" field at all) - they
+        # go through the separate winget/choco checkbox branches earlier in the same function,
+        # already covered by its own dedicated tests.
+        $applications = Get-WinUtilConfigObject -Name "applications"
+        $detectionScript = Get-Content -Path (Join-Path $script:repoRoot "functions\private\Invoke-WinUtilCurrentSystem.ps1") -Raw
+
+        $installTypesInUse = @($applications.PSObject.Properties.Value.installType |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+
+        $missingCase = New-Object System.Collections.Generic.List[string]
+        foreach ($installType in $installTypesInUse) {
+            if ($detectionScript -notmatch [regex]::Escape('"' + $installType + '"')) {
+                $missingCase.Add($installType)
+            }
+        }
+
+        $missingCase | Should -BeNullOrEmpty -Because "Invoke-WinUtilCurrentSystem.ps1 has no 'Show Installed Apps' detection case for: $($missingCase -join ', ')"
+    }
 }
 
 Describe "Tweaks config" {

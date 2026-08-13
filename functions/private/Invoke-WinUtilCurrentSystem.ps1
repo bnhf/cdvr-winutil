@@ -92,11 +92,28 @@ Function Invoke-WinUtilCurrentSystem {
                     }
                 }
                 { $_ -eq "direct" -or $_ -eq "github" } {
-                    # No winget/choco/WSL-based signal exists for these - fall back to probing
-                    # the catalog's own "webui" URL (already used for the app's "Open" button)
-                    # when one is declared. Entries with neither (e.g. Clicker) can't be detected
-                    # this way and are left unchecked, same as before this fix.
-                    if ($entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)) {
+                    # No winget/choco/WSL-based signal exists for these. Two independent checks,
+                    # either one is enough: the catalog's own "webui" URL (already used for the
+                    # app's "Open" button) when declared, and - confirmed live for Clicker via
+                    # its own repo docs ("the installer registers an uninstaller") - a matching
+                    # entry in Windows' Add/Remove Programs registry, the same lookup
+                    # Uninstall-WinUtilProgramGithub already relies on to actually uninstall
+                    # these. Regression guard: this used to be webui-only, so any github-type
+                    # entry without one (4 of the 6 currently in the catalog, including Clicker)
+                    # could never be detected as installed no matter what was actually on disk.
+                    $reachableViaWebui = $entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)
+                    $foundInAddRemovePrograms = -not [string]::IsNullOrWhiteSpace(
+                        (Get-WinUtilProgramUninstallString -DisplayNamePattern "*$($entry.Value.content)*").UninstallString
+                    )
+                    if ($reachableViaWebui -or $foundInAddRemovePrograms) {
+                        Write-Output $entry.Key
+                    }
+                }
+                "npm" {
+                    # Regression guard: this installType had no detection case at all - Prismcast
+                    # (currently the only npm-type entry) could never be shown as installed by
+                    # "Show Installed Apps", the same class of gap "direct"/"github" had.
+                    if ($entry.Value.npmPackage -and (Test-WinUtilNpmPackageInstalled -NpmPackage $entry.Value.npmPackage)) {
                         Write-Output $entry.Key
                     }
                 }
