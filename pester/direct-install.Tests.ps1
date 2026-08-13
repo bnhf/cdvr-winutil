@@ -8,6 +8,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilProgramDirect.ps1")
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilProgramDirect.ps1")
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilProgramGithub.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPortableGithubInstallDir.ps1")
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
     function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec) }
@@ -200,6 +201,10 @@ Describe "Install-WinUtilProgramGithub" {
         Mock Start-WinUtilProcessAsStandardUserNoWait { $true }
         Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
         Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock New-Item { }
+        Mock Move-Item { }
+        Mock Get-Process { }
+        Mock Stop-Process { }
     }
 
     It "launches the downloaded release asset de-elevated" {
@@ -280,5 +285,51 @@ Describe "Install-WinUtilProgramGithub" {
         $package = [pscustomobject]@{ content = "Clicker"; repo = "mackid1993/Clicker"; assetPattern = "Clicker-Setup-*.exe" }
 
         { Install-WinUtilProgramGithub -Packages @($package) } | Should -Not -Throw
+    }
+
+    Context "portable packages (no setup wizard, never register in Add/Remove Programs)" {
+        BeforeEach {
+            Mock Invoke-RestMethod {
+                [pscustomobject]@{
+                    assets = @([pscustomobject]@{ name = "PlutoForChannels.exe"; browser_download_url = "https://example.com/PlutoForChannels.exe" })
+                }
+            }
+        }
+
+        It "moves the downloaded asset into its fixed install folder and launches it from there, not from TEMP" {
+            # Regression guard for the actual reported bug: Pluto for Channels was launched
+            # straight out of %TEMP% (the same as any other github-type install), then Uninstall-
+            # WinUtilProgramGithub's Add/Remove Programs lookup always failed for it, since a
+            # portable exe never registers itself there - confirmed via its own repo docs
+            # ("doesn't register itself in Windows' Add/Remove Programs").
+            $installDir = Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels"
+            $package = [pscustomobject]@{ content = "Pluto for Channels"; repo = "nuken/Pluto-Windows_4C"; assetPattern = "PlutoForChannels*.exe"; portable = $true }
+
+            Install-WinUtilProgramGithub -Packages @($package)
+
+            Should -Invoke -CommandName New-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $installDir }
+            Should -Invoke -CommandName Move-Item -Times 1 -Exactly -ParameterFilter {
+                $Destination -eq (Join-Path $installDir "PlutoForChannels.exe")
+            }
+            Should -Invoke -CommandName Start-WinUtilProcessAsStandardUserNoWait -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq (Join-Path $installDir "PlutoForChannels.exe")
+            }
+        }
+
+        It "stops a previous run of the app before overwriting its files, so a reinstall isn't blocked by a file lock" {
+            $installDir = Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels"
+            Mock Get-Process {
+                @(
+                    [pscustomobject]@{ Id = 4242; Path = Join-Path $installDir "PlutoForChannels.exe" }
+                    [pscustomobject]@{ Id = 9999; Path = "C:\Windows\explorer.exe" }
+                )
+            }
+            $package = [pscustomobject]@{ content = "Pluto for Channels"; repo = "nuken/Pluto-Windows_4C"; assetPattern = "PlutoForChannels*.exe"; portable = $true }
+
+            Install-WinUtilProgramGithub -Packages @($package)
+
+            Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
+            Should -Invoke -CommandName Stop-Process -Times 0 -Exactly -ParameterFilter { $Id -eq 9999 }
+        }
     }
 }

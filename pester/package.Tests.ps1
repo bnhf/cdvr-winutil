@@ -154,25 +154,28 @@ Describe "Test-WinUtilPackageManager" {
 Describe "Install-WinUtilProgramWinget" {
     BeforeEach {
         Mock Write-WinUtilLog { }
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
         Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
     }
 
-    It "starts winget with install arguments" {
+    It "starts winget de-elevated (as standard user) with install arguments" {
+        # De-elevated first, not elevated first - see the function's own docstring for why:
+        # running winget (and anything an installer auto-launches on finish, e.g. UniGetUI) in
+        # WinUtil's own elevated context by default meant every such app inherited admin rights
+        # it didn't need, not just the packages that failed outright.
         Install-WinUtilProgramWinget -Action Install -Programs @("Git.Git")
 
-        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly -ParameterFilter {
             $FilePath -eq "winget" -and
-                (@($ArgumentList) -join "|") -eq "install|--id|Git.Git|--accept-package-agreements|--accept-source-agreements|--source|winget|--silent" -and
-                $NoNewWindow -eq $true -and
-                $Wait -eq $true -and
-                $PassThru -eq $true
+                (@($ArgumentList) -join "|") -eq "install|--id|Git.Git|--accept-package-agreements|--accept-source-agreements|--source|winget|--silent"
         }
+        Should -Invoke -CommandName Start-Process -Times 0 -Exactly
     }
 
     It "starts winget with uninstall arguments and msstore source when requested" {
         Install-WinUtilProgramWinget -Action Uninstall -Programs @("msstore:9NBLGGH4NNS1")
 
-        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly -ParameterFilter {
             $FilePath -eq "winget" -and
                 (@($ArgumentList) -join "|") -eq "uninstall|--id|9NBLGGH4NNS1|--source|msstore|--silent"
         }
@@ -181,10 +184,11 @@ Describe "Install-WinUtilProgramWinget" {
     It "skips whitespace and na package IDs" {
         Install-WinUtilProgramWinget -Action Install -Programs @(" ", "na")
 
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 0 -Exactly
         Should -Invoke -CommandName Start-Process -Times 0 -Exactly
     }
 
-    It "returns a success result per program when the elevated attempt succeeds" {
+    It "returns a success result per program when the de-elevated attempt succeeds" {
         $result = Install-WinUtilProgramWinget -Action Install -Programs @("Git.Git")
 
         $result | Should -HaveCount 1
@@ -193,37 +197,33 @@ Describe "Install-WinUtilProgramWinget" {
         $result[0].ExitCode | Should -Be 0
     }
 
-    It "retries as standard user when winget reports a wrong-integrity-context error, and succeeds if that retry works" {
-        # Regression guard: uninstalling a per-user-scope package (e.g. Vivaldi) while WinUtil
-        # runs elevated fails with APPINSTALLER_CLI_ERROR_ADMIN_CONTEXT_ACTION_PROHIBITED
-        # (0x8A15007D / -1978335107) - that specific code should trigger exactly one de-elevated
-        # retry, not be treated as a hard failure.
-        Mock Start-Process { [pscustomobject]@{ ExitCode = -1978335107 } }
-        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
-
-        $result = Install-WinUtilProgramWinget -Action Uninstall -Programs @("Vivaldi.Vivaldi")
-
-        $result[0].Success | Should -BeTrue
-        $result[0].ExitCode | Should -Be 0
-        Should -Invoke -CommandName Start-Process -Times 1 -Exactly
-        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly -ParameterFilter {
-            $FilePath -eq "winget"
-        }
-    }
-
-    It "does not retry on a generic failure that isn't a wrong-context error" {
-        # Regression guard for the VLC case: APPINSTALLER_CLI_ERROR_EXEC_UNINSTALL_COMMAND_FAILED
-        # (0x8A150030 / -1978335184) means the uninstaller itself failed (e.g. it needed admin
-        # rights) - retrying de-elevated would make that worse, not better, so this must NOT
-        # trigger the standard-user retry and must be reported as a real failure.
-        Mock Start-Process { [pscustomobject]@{ ExitCode = -1978335184 } }
-        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
+    It "retries elevated when the de-elevated attempt fails, and succeeds if that retry works" {
+        # Regression guard for the VLC case: a machine-scope package's uninstaller needs admin
+        # rights to touch Program Files/HKLM, so the de-elevated attempt is EXPECTED to fail
+        # here - that must trigger exactly one elevated retry, not be reported as a hard failure.
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = -1978335184 } }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
 
         $result = Install-WinUtilProgramWinget -Action Uninstall -Programs @("VideoLAN.VLC")
 
+        $result[0].Success | Should -BeTrue
+        $result[0].ExitCode | Should -Be 0
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "winget" -and $Wait -eq $true -and $PassThru -eq $true
+        }
+    }
+
+    It "reports a real failure when both the de-elevated and elevated attempts fail" {
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 1 } }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } }
+
+        $result = Install-WinUtilProgramWinget -Action Install -Programs @("Nonexistent.Package")
+
         $result[0].Success | Should -BeFalse
-        $result[0].ExitCode | Should -Be -1978335184
-        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 0 -Exactly
+        $result[0].ExitCode | Should -Be 1
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly
     }
 }
 

@@ -4,14 +4,32 @@ Function Install-WinUtilProgramWinget {
         Installs or uninstalls the given winget package IDs.
 
     .DESCRIPTION
-        Runs winget natively in WinUtil's own (elevated) process first - correct for
-        machine-scope packages (e.g. VLC, whose own uninstaller needs admin rights to touch
-        Program Files/HKLM). Only retries de-elevated, via Start-WinUtilProcessAsStandardUser,
-        when winget's exit code specifically indicates the operation was blocked purely because
-        of the wrong integrity context - not on every failure. Blindly de-elevating every winget
-        call (an earlier version of this function did that) fixed per-user-scope packages like
-        Vivaldi but broke machine-scope ones like VLC, whose bundled uninstaller then failed
-        for lack of admin rights - trading one scope-mismatch bug for the opposite one.
+        Runs winget de-elevated (standard user) first via Start-WinUtilProcessAsStandardUser -
+        the same context an ordinary, non-admin user runs winget in, and the context most
+        per-user-scope packages (the majority of the catalog: browsers, Node.js, etc.) actually
+        need to install/uninstall correctly. Only falls back to running winget natively in
+        WinUtil's own elevated process when the de-elevated attempt fails for any reason -
+        machine-scope packages (e.g. VLC, whose uninstaller needs admin rights to touch Program
+        Files/HKLM) are expected to fail de-elevated and succeed on that elevated retry.
+
+        This is the reverse of an earlier version of this function, which ran elevated first and
+        only retried de-elevated on two specific "wrong integrity context" exit codes. That
+        approach fixed the exit-code-reported failures (e.g. Vivaldi's uninstall) but missed a
+        quieter class of the same problem: winget installing (or an installer auto-launching)
+        entirely successfully while still elevated, which for a package like UniGetUI meant the
+        app itself launched as Administrator and warned about it - not a failure winget reports
+        via exit code at all, so no exit-code allowlist could have caught it. De-elevating first
+        avoids that whole class of problem for every package that doesn't specifically need
+        admin, rather than only reacting to the ones that fail loudly.
+
+        Falling back on ANY non-zero exit code (not a curated list) is deliberate: the
+        de-elevated attempt is now the one taking the risk (most packages should succeed there),
+        so the fallback's job is just "make elevation available when something turns out to
+        need it," the same permissive, catch-all fallback Start-WinUtilProcessAsStandardUser
+        itself already uses when de-elevation can't be set up at all. The cost is a slower
+        failure report for a genuine (non-scope-related) error, since it gets attempted twice
+        before being reported - not a correctness issue, since the final reported result always
+        reflects the elevated (fallback) attempt's own outcome.
 
     .OUTPUTS
         One [pscustomobject] per attempted program (blank/na entries are skipped, not
@@ -26,14 +44,6 @@ Function Install-WinUtilProgramWinget {
         [Parameter(Mandatory=$true)]
         [string[]]$Programs
     )
-
-    # winget exit codes that mean "blocked purely by running in the wrong integrity context",
-    # not a real install/uninstall failure - safe to retry once in the other context:
-    #   0x8A15007D APPINSTALLER_CLI_ERROR_ADMIN_CONTEXT_ACTION_PROHIBITED (-1978335107) - a
-    #     per-user-scope package refused because WinUtil is running elevated (the Vivaldi case).
-    #   0x8A150056 APPINSTALLER_CLI_ERROR_INSTALLER_PROHIBITS_ELEVATION (-1978335146) - the
-    #     installer itself refuses to run elevated.
-    $wrongContextExitCodes = @(-1978335107, -1978335146)
 
     $results = [System.Collections.Generic.List[object]]::new()
 
@@ -56,11 +66,11 @@ Function Install-WinUtilProgramWinget {
 
         Write-WinUtilLog -Component "Package" -Message "$Action winget package: $program (source: $source)"
 
-        $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+        $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
 
-        if ($wrongContextExitCodes -contains $process.ExitCode) {
-            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$Action winget package: $program failed running elevated (exit code: $($process.ExitCode)) - retrying as standard user."
-            $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
+        if ($process.ExitCode -ne 0) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$Action winget package: $program failed running as standard user (exit code: $($process.ExitCode)) - retrying elevated."
+            $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         }
 
         $success = $process.ExitCode -eq 0

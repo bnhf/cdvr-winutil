@@ -232,6 +232,7 @@
         "installType": "github",
         "repo": "nuken/Pluto-Windows_4C",
         "assetPattern": "PlutoForChannels*.exe",
+        "portable": true,
         "foss": true
     },
     "androidadbbridge": {

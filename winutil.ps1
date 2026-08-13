@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1327
+    Version        : v2026.08.13.1414
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1327"
+$sync.version = "v2026.08.13.1414"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -875,6 +875,29 @@ function Get-WinUtilPackagesInDependencyOrder {
     foreach ($p in $remaining) { $sorted.Add($p) }
 
     return ,$sorted.ToArray()
+}
+
+function Get-WinUtilPortableGithubInstallDir {
+    <#
+    .SYNOPSIS
+        Returns the fixed per-app folder a "portable" github-install-type package is
+        downloaded into and run from.
+
+    .DESCRIPTION
+        A "portable" github-install-type package (catalog field "portable": true, e.g. Pluto
+        for Channels) is a standalone executable with no setup wizard - confirmed via its own
+        repo docs: "Move the .exe to a folder of your choice... doesn't register itself in
+        Windows' Add/Remove Programs." Install-WinUtilProgramGithub, Uninstall-WinUtilProgramGithub,
+        and Invoke-WinUtilCurrentSystem's "Show Installed Apps" detection all need to agree on
+        exactly the same folder for a given app - a single shared helper here, rather than each
+        one building the same Join-Path string independently, is what keeps that guaranteed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    Join-Path $env:LocalAppData "CDVRWinUtil-Portable\$Name"
 }
 
 function Get-WinUtilProgramUninstallString {
@@ -2015,6 +2038,52 @@ Function Install-WinUtilProgramGithub {
                         Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
                     }
                 }
+            } elseif ($package.portable) {
+                # "portable" (e.g. Pluto for Channels) means the asset itself is the app - no
+                # setup wizard, no Add/Remove Programs registration (confirmed via its own repo
+                # docs: "Move the .exe to a folder of your choice... doesn't register itself").
+                # Running it straight out of %TEMP%, like the plain interactive branch below
+                # does, would leave it with no persistent home to relaunch from later and
+                # nothing for Uninstall-WinUtilProgramGithub to find - move it into a fixed
+                # per-app folder instead, the same idea Install-WinUtilStreamLinkManager uses.
+                $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
+
+                # Stop a previous run of this exact install first, so a reinstall/update isn't
+                # blocked by the old file being locked open. Explicit -Id/foreach, not a
+                # Get-Process | Stop-Process pipeline (or -InputObject, which is strongly typed
+                # to [System.Diagnostics.Process[]] on the real cmdlet and can't be satisfied by
+                # a test double) - matches the pattern Start-WinUtilProcessAsStandardUserNoWait's
+                # own process lookup already uses.
+                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $runningFromInstallDir = $false
+                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $runningFromInstallDir
+                })
+                foreach ($runningInstance in $runningInstances) {
+                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
+                }
+
+                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+                $persistentPath = Join-Path $installDir $asset.name
+                Move-Item -Path $dest -Destination $persistentPath -Force
+
+                if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $persistentPath) {
+                    Write-WinUtilLog -Component "Package" -Message "$name installed to $installDir and launched."
+                } else {
+                    $proc = Start-Process -FilePath $persistentPath -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                    Write-WinUtilLog -Component "Package" -Message "$name installed to $installDir and launched."
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($package.postInstallCommand)) {
+                    Write-WinUtilLog -Component "Package" -Message "Running post-install step for $name`: $($package.postInstallCommand)"
+                    try {
+                        & ([scriptblock]::Create($package.postInstallCommand))
+                        Write-WinUtilLog -Component "Package" -Message "$name post-install step completed"
+                    } catch {
+                        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
+                    }
+                }
             } else {
                 # No known silent-install flag for these community-released installers, so this
                 # runs interactively - and some interactive installers launch a long-running
@@ -2112,14 +2181,32 @@ Function Install-WinUtilProgramWinget {
         Installs or uninstalls the given winget package IDs.
 
     .DESCRIPTION
-        Runs winget natively in WinUtil's own (elevated) process first - correct for
-        machine-scope packages (e.g. VLC, whose own uninstaller needs admin rights to touch
-        Program Files/HKLM). Only retries de-elevated, via Start-WinUtilProcessAsStandardUser,
-        when winget's exit code specifically indicates the operation was blocked purely because
-        of the wrong integrity context - not on every failure. Blindly de-elevating every winget
-        call (an earlier version of this function did that) fixed per-user-scope packages like
-        Vivaldi but broke machine-scope ones like VLC, whose bundled uninstaller then failed
-        for lack of admin rights - trading one scope-mismatch bug for the opposite one.
+        Runs winget de-elevated (standard user) first via Start-WinUtilProcessAsStandardUser -
+        the same context an ordinary, non-admin user runs winget in, and the context most
+        per-user-scope packages (the majority of the catalog: browsers, Node.js, etc.) actually
+        need to install/uninstall correctly. Only falls back to running winget natively in
+        WinUtil's own elevated process when the de-elevated attempt fails for any reason -
+        machine-scope packages (e.g. VLC, whose uninstaller needs admin rights to touch Program
+        Files/HKLM) are expected to fail de-elevated and succeed on that elevated retry.
+
+        This is the reverse of an earlier version of this function, which ran elevated first and
+        only retried de-elevated on two specific "wrong integrity context" exit codes. That
+        approach fixed the exit-code-reported failures (e.g. Vivaldi's uninstall) but missed a
+        quieter class of the same problem: winget installing (or an installer auto-launching)
+        entirely successfully while still elevated, which for a package like UniGetUI meant the
+        app itself launched as Administrator and warned about it - not a failure winget reports
+        via exit code at all, so no exit-code allowlist could have caught it. De-elevating first
+        avoids that whole class of problem for every package that doesn't specifically need
+        admin, rather than only reacting to the ones that fail loudly.
+
+        Falling back on ANY non-zero exit code (not a curated list) is deliberate: the
+        de-elevated attempt is now the one taking the risk (most packages should succeed there),
+        so the fallback's job is just "make elevation available when something turns out to
+        need it," the same permissive, catch-all fallback Start-WinUtilProcessAsStandardUser
+        itself already uses when de-elevation can't be set up at all. The cost is a slower
+        failure report for a genuine (non-scope-related) error, since it gets attempted twice
+        before being reported - not a correctness issue, since the final reported result always
+        reflects the elevated (fallback) attempt's own outcome.
 
     .OUTPUTS
         One [pscustomobject] per attempted program (blank/na entries are skipped, not
@@ -2134,14 +2221,6 @@ Function Install-WinUtilProgramWinget {
         [Parameter(Mandatory=$true)]
         [string[]]$Programs
     )
-
-    # winget exit codes that mean "blocked purely by running in the wrong integrity context",
-    # not a real install/uninstall failure - safe to retry once in the other context:
-    #   0x8A15007D APPINSTALLER_CLI_ERROR_ADMIN_CONTEXT_ACTION_PROHIBITED (-1978335107) - a
-    #     per-user-scope package refused because WinUtil is running elevated (the Vivaldi case).
-    #   0x8A150056 APPINSTALLER_CLI_ERROR_INSTALLER_PROHIBITS_ELEVATION (-1978335146) - the
-    #     installer itself refuses to run elevated.
-    $wrongContextExitCodes = @(-1978335107, -1978335146)
 
     $results = [System.Collections.Generic.List[object]]::new()
 
@@ -2164,11 +2243,11 @@ Function Install-WinUtilProgramWinget {
 
         Write-WinUtilLog -Component "Package" -Message "$Action winget package: $program (source: $source)"
 
-        $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+        $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
 
-        if ($wrongContextExitCodes -contains $process.ExitCode) {
-            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$Action winget package: $program failed running elevated (exit code: $($process.ExitCode)) - retrying as standard user."
-            $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
+        if ($process.ExitCode -ne 0) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$Action winget package: $program failed running as standard user (exit code: $($process.ExitCode)) - retrying elevated."
+            $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         }
 
         $success = $process.ExitCode -eq 0
@@ -2210,6 +2289,10 @@ Function Install-WinUtilStreamLinkManager {
         No uninstall is documented upstream either. Because this owns the entire install
         location, Uninstall-WinUtilStreamLinkManager can safely remove it outright: stop the
         process, unregister the scheduled task, delete the install directory.
+
+        Both the initial launch and the at-logon scheduled task run de-elevated (standard user),
+        not inheriting WinUtil's own elevated context - see the inline comment above the
+        schtasks call for why, despite slm.bat's own script using an elevated RunLevel.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists. Particularly relevant here: confirmed live, this
@@ -2267,15 +2350,25 @@ Function Install-WinUtilStreamLinkManager {
                 throw "slm.exe not found in the extracted package - the upstream release layout may have changed."
             }
 
-            # Register it to start at logon, matching slm.bat's own "startup" command
-            # (schtasks .../rl highest). WinUtil already runs elevated, so - unlike slm.bat,
-            # which re-elevates separately for this - the task can be registered directly.
+            # Register it to start at logon. slm.bat's own "startup" command uses schtasks
+            # .../rl highest (elevated) - but per its own source, the ONLY thing that actually
+            # needs elevation is the separate, independently-self-elevating (-Verb RunAs) "port"
+            # command that opens a Windows Firewall rule; the app's core job (organizing local
+            # media library data, serving a local web UI) needs no admin rights at all. Running
+            # a background tray app elevated at every login, indefinitely, for no functional
+            # reason is exactly the kind of unnecessary-elevation problem WinUtil should avoid
+            # introducing on its own users' behalf, even though upstream's own script does it -
+            # /rl limited here instead, matching the same de-elevated RunLevel
+            # Start-WinUtilProcessAsStandardUserNoWait already uses for install-time launches.
             $runCommand = "powershell -NoProfile -WindowStyle Hidden -Command `"Start-Process -WindowStyle Hidden '$exePath'`""
-            & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl highest /f | Out-Null
+            & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl limited /f | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Starting $name"
             if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
-            Start-Process -WindowStyle Hidden -FilePath $exePath
+            # De-elevated for the same reason as the scheduled task above - see that comment.
+            if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $exePath)) {
+                Start-Process -WindowStyle Hidden -FilePath $exePath
+            }
 
             Write-WinUtilLog -Component "Package" -Message "$name installed and started - web interface at $($package.webui)"
         } catch {
@@ -2915,7 +3008,15 @@ Function Invoke-WinUtilCurrentSystem {
                     $foundInAddRemovePrograms = -not [string]::IsNullOrWhiteSpace(
                         (Get-WinUtilProgramUninstallString -DisplayNamePattern "*$($entry.Value.content)*").UninstallString
                     )
-                    if ($reachableViaWebui -or $foundInAddRemovePrograms) {
+                    # "portable" github-type packages (e.g. Pluto for Channels) never register in
+                    # Add/Remove Programs at all - confirmed live, this caused a false negative
+                    # here (and a failed uninstall attempt) even with the app fully installed and
+                    # just not currently running. A third, independent signal for these: check
+                    # their own fixed install folder directly, the same idea streamLinkManager
+                    # uses below.
+                    $foundAsPortableInstall = $entry.Value.portable -and $entry.Value.assetPattern -and
+                        (Test-WinUtilPortableGithubInstalled -Name $entry.Value.content -AssetPattern $entry.Value.assetPattern)
+                    if ($reachableViaWebui -or $foundInAddRemovePrograms -or $foundAsPortableInstall) {
                         Write-Output $entry.Key
                     }
                 }
@@ -5327,6 +5428,47 @@ function New-WinUtilStepProgressCallback {
     }.GetNewClosure()
 }
 
+function Open-WinUtilLink {
+    <#
+    .SYNOPSIS
+        Opens a URL, file, or shell path (e.g. an app's web UI, its homepage, or a Start Menu
+        shortcut target) at the user's normal integrity level, not inheriting WinUtil's own
+        elevated context.
+
+    .DESCRIPTION
+        WinUtil always self-elevates at startup (WSL2/Docker/Chocolatey genuinely need admin),
+        but every UI entry point that opens a link - the app popup's "Open" and "Info" buttons,
+        and hyperlinks inside message dialogs - previously called Start-Process directly, which
+        inherits that elevated token. Confirmed live: this launches the user's default browser,
+        or the target app itself, with administrator rights every time - for something as
+        routine as viewing an app's homepage or its already-running web dashboard. Browsers in
+        particular actively discourage running elevated (extensions and some sites behave
+        differently, and it needlessly runs untrusted web content with an admin token).
+
+        De-elevated via Start-WinUtilProcessAsStandardUserNoWait, the same scheduled-task
+        technique already used for de-elevating installer launches - Task Scheduler's "start a
+        program" action resolves its target through the same shell association mechanism as
+        Start-Process, so a URL or shell:AppsFolder path works here exactly like a plain .exe
+        path does elsewhere. Falls back to a normal (elevated) Start-Process if de-elevation
+        itself fails, so a link still opens rather than silently doing nothing.
+    #>
+    param(
+        # Not Mandatory: PowerShell's own Mandatory-parameter binding rejects an empty string
+        # before the function body ever runs (and would interactively prompt for a $null one),
+        # which defeats the graceful no-op below for a caller whose target genuinely may be
+        # unset (e.g. an app with no declared webui and no matching Start Menu shortcut).
+        [string]$Target
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Target)) {
+        return
+    }
+
+    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $Target)) {
+        Start-Process -FilePath $Target
+    }
+}
+
 function Remove-WinUtilAPPX {
     <#
 
@@ -6388,7 +6530,7 @@ function Show-CustomDialog {
         $hyperlink.Add_Click({
             param($eventSender, $routedEvent)
             $null = $routedEvent
-            Start-Process $eventSender.NavigateUri.AbsoluteUri
+            Open-WinUtilLink -Target $eventSender.NavigateUri.AbsoluteUri
         })
         $hyperlink.Add_MouseEnter({
             param($eventSender, $routedEvent)
@@ -7129,6 +7271,37 @@ function Test-WinUtilPackageManager {
     return $status
 }
 
+function Test-WinUtilPortableGithubInstalled {
+    <#
+    .SYNOPSIS
+        Returns $true if a "portable" github-install-type package is present in its fixed
+        per-app folder under LocalAppData - used by "Show Installed Apps" for these packages,
+        which have no winget/choco id and never register in Add/Remove Programs.
+
+    .DESCRIPTION
+        The other two "github" detection signals (webui reachability, an Add/Remove Programs
+        entry) both depend on the app currently being reachable/registered - neither works for
+        a portable app that's installed but not currently running, since it never registers
+        itself anywhere. Install-WinUtilProgramGithub always persists a portable package to
+        Get-WinUtilPortableGithubInstallDir's exact folder, so checking there for a file
+        matching the catalog's own assetPattern is a reliable, independent third signal.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AssetPattern
+    )
+
+    $installDir = Get-WinUtilPortableGithubInstallDir -Name $Name
+    if (-not (Test-Path $installDir)) {
+        return $false
+    }
+
+    return [bool](Get-ChildItem -Path $installDir -Filter $AssetPattern -ErrorAction SilentlyContinue)
+}
+
 function Test-WinUtilProgramInstalled {
     <#
     .SYNOPSIS
@@ -7609,6 +7782,13 @@ Function Uninstall-WinUtilProgramGithub {
         via its own repo docs: "the installer registers an uninstaller; nothing has to be
         deleted by hand."
 
+        "portable" packages (catalog field "portable": true, e.g. Pluto for Channels) skip all
+        of the above - they never register in Add/Remove Programs in the first place (confirmed
+        via its own repo docs), so that lookup would always fail for them. Install-WinUtilProgramGithub
+        always installs these into Get-WinUtilPortableGithubInstallDir's fixed per-app folder, so
+        uninstalling one is the same "stop the process, delete the folder" approach
+        Uninstall-WinUtilStreamLinkManager already uses for the same reason.
+
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
     #>
@@ -7624,6 +7804,32 @@ Function Uninstall-WinUtilProgramGithub {
 
         if ([string]::IsNullOrWhiteSpace($name)) {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "GitHub uninstall is missing content (display name) to look up."
+            continue
+        }
+
+        if ($package.portable) {
+            Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
+            try {
+                $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
+
+                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $runningFromInstallDir = $false
+                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $runningFromInstallDir
+                })
+                foreach ($runningInstance in $runningInstances) {
+                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
+                }
+
+                if (Test-Path $installDir) {
+                    Remove-Item $installDir -Recurse -Force
+                }
+
+                Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+            } catch {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall ${name}: $_"
+            }
             continue
         }
 
@@ -8003,7 +8209,7 @@ function Initialize-WPFUI {
                         })
                         $newButton.Add_Click({
                             $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
-                            Start-Process $appObject.link
+                            Open-WinUtilLink -Target $appObject.link
                         })
                     }
                     "Open" {
@@ -8028,7 +8234,7 @@ function Initialize-WPFUI {
                         })
                         $newButton.Add_Click({
                             if ($this.Tag) {
-                                Start-Process $this.Tag
+                                Open-WinUtilLink -Target $this.Tag
                             }
                         })
                     }
@@ -11118,6 +11324,7 @@ $sync.configs.applications = @'
     "installType": "github",
     "repo": "nuken/Pluto-Windows_4C",
     "assetPattern": "PlutoForChannels*.exe",
+    "portable": true,
     "foss": true
   },
   "WPFInstallandroidadbbridge": {

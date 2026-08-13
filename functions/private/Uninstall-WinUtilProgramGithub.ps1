@@ -24,6 +24,13 @@ Function Uninstall-WinUtilProgramGithub {
         via its own repo docs: "the installer registers an uninstaller; nothing has to be
         deleted by hand."
 
+        "portable" packages (catalog field "portable": true, e.g. Pluto for Channels) skip all
+        of the above - they never register in Add/Remove Programs in the first place (confirmed
+        via its own repo docs), so that lookup would always fail for them. Install-WinUtilProgramGithub
+        always installs these into Get-WinUtilPortableGithubInstallDir's fixed per-app folder, so
+        uninstalling one is the same "stop the process, delete the folder" approach
+        Uninstall-WinUtilStreamLinkManager already uses for the same reason.
+
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
     #>
@@ -39,6 +46,32 @@ Function Uninstall-WinUtilProgramGithub {
 
         if ([string]::IsNullOrWhiteSpace($name)) {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "GitHub uninstall is missing content (display name) to look up."
+            continue
+        }
+
+        if ($package.portable) {
+            Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
+            try {
+                $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
+
+                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $runningFromInstallDir = $false
+                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $runningFromInstallDir
+                })
+                foreach ($runningInstance in $runningInstances) {
+                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
+                }
+
+                if (Test-Path $installDir) {
+                    Remove-Item $installDir -Recurse -Force
+                }
+
+                Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+            } catch {
+                Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall ${name}: $_"
+            }
             continue
         }
 

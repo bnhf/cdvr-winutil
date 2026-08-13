@@ -105,7 +105,15 @@ Function Invoke-WinUtilCurrentSystem {
                     $foundInAddRemovePrograms = -not [string]::IsNullOrWhiteSpace(
                         (Get-WinUtilProgramUninstallString -DisplayNamePattern "*$($entry.Value.content)*").UninstallString
                     )
-                    if ($reachableViaWebui -or $foundInAddRemovePrograms) {
+                    # "portable" github-type packages (e.g. Pluto for Channels) never register in
+                    # Add/Remove Programs at all - confirmed live, this caused a false negative
+                    # here (and a failed uninstall attempt) even with the app fully installed and
+                    # just not currently running. A third, independent signal for these: check
+                    # their own fixed install folder directly, the same idea streamLinkManager
+                    # uses below.
+                    $foundAsPortableInstall = $entry.Value.portable -and $entry.Value.assetPattern -and
+                        (Test-WinUtilPortableGithubInstalled -Name $entry.Value.content -AssetPattern $entry.Value.assetPattern)
+                    if ($reachableViaWebui -or $foundInAddRemovePrograms -or $foundAsPortableInstall) {
                         Write-Output $entry.Key
                     }
                 }

@@ -213,7 +213,7 @@ function Show-CustomDialog {
         $hyperlink.Add_Click({
             param($eventSender, $routedEvent)
             $null = $routedEvent
-            Start-Process $eventSender.NavigateUri.AbsoluteUri
+            Open-WinUtilLink -Target $eventSender.NavigateUri.AbsoluteUri
         })
         $hyperlink.Add_MouseEnter({
             param($eventSender, $routedEvent)

@@ -103,7 +103,7 @@ function Initialize-WPFUI {
                         })
                         $newButton.Add_Click({
                             $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
-                            Start-Process $appObject.link
+                            Open-WinUtilLink -Target $appObject.link
                         })
                     }
                     "Open" {
@@ -128,7 +128,7 @@ function Initialize-WPFUI {
                         })
                         $newButton.Add_Click({
                             if ($this.Tag) {
-                                Start-Process $this.Tag
+                                Open-WinUtilLink -Target $this.Tag
                             }
                         })
                     }

@@ -102,6 +102,52 @@ Function Install-WinUtilProgramGithub {
                         Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
                     }
                 }
+            } elseif ($package.portable) {
+                # "portable" (e.g. Pluto for Channels) means the asset itself is the app - no
+                # setup wizard, no Add/Remove Programs registration (confirmed via its own repo
+                # docs: "Move the .exe to a folder of your choice... doesn't register itself").
+                # Running it straight out of %TEMP%, like the plain interactive branch below
+                # does, would leave it with no persistent home to relaunch from later and
+                # nothing for Uninstall-WinUtilProgramGithub to find - move it into a fixed
+                # per-app folder instead, the same idea Install-WinUtilStreamLinkManager uses.
+                $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
+
+                # Stop a previous run of this exact install first, so a reinstall/update isn't
+                # blocked by the old file being locked open. Explicit -Id/foreach, not a
+                # Get-Process | Stop-Process pipeline (or -InputObject, which is strongly typed
+                # to [System.Diagnostics.Process[]] on the real cmdlet and can't be satisfied by
+                # a test double) - matches the pattern Start-WinUtilProcessAsStandardUserNoWait's
+                # own process lookup already uses.
+                $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $runningFromInstallDir = $false
+                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $runningFromInstallDir
+                })
+                foreach ($runningInstance in $runningInstances) {
+                    Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
+                }
+
+                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+                $persistentPath = Join-Path $installDir $asset.name
+                Move-Item -Path $dest -Destination $persistentPath -Force
+
+                if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $persistentPath) {
+                    Write-WinUtilLog -Component "Package" -Message "$name installed to $installDir and launched."
+                } else {
+                    $proc = Start-Process -FilePath $persistentPath -PassThru
+                    Set-WinUtilProcessForeground -Process $proc
+                    Write-WinUtilLog -Component "Package" -Message "$name installed to $installDir and launched."
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($package.postInstallCommand)) {
+                    Write-WinUtilLog -Component "Package" -Message "Running post-install step for $name`: $($package.postInstallCommand)"
+                    try {
+                        & ([scriptblock]::Create($package.postInstallCommand))
+                        Write-WinUtilLog -Component "Package" -Message "$name post-install step completed"
+                    } catch {
+                        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
+                    }
+                }
             } else {
                 # No known silent-install flag for these community-released installers, so this
                 # runs interactively - and some interactive installers launch a long-running

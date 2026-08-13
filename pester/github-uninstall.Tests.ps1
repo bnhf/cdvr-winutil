@@ -7,10 +7,45 @@ BeforeAll {
 
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilProgramUninstallString.ps1")
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilProgramGithub.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPortableGithubInstallDir.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Test-WinUtilPortableGithubInstalled.ps1")
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
     function Set-WinUtilProcessForeground { param($Process) }
     function Start-WinUtilProcessAsStandardUserNoWait { param($FilePath, $ArgumentList) }
+}
+
+Describe "Get-WinUtilPortableGithubInstallDir" {
+    It "builds a fixed, namespaced folder under LocalAppData from the package name" {
+        Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels" |
+            Should -Be (Join-Path $env:LocalAppData "CDVRWinUtil-Portable\Pluto for Channels")
+    }
+}
+
+Describe "Test-WinUtilPortableGithubInstalled" {
+    It "returns false when the install folder doesn't exist" {
+        Mock Test-Path { $false }
+
+        Test-WinUtilPortableGithubInstalled -Name "Pluto for Channels" -AssetPattern "PlutoForChannels*.exe" | Should -BeFalse
+    }
+
+    It "returns true when a file matching the asset pattern exists in the install folder" {
+        Mock Test-Path { $true }
+        Mock Get-ChildItem { [pscustomobject]@{ Name = "PlutoForChannels.exe" } }
+
+        Test-WinUtilPortableGithubInstalled -Name "Pluto for Channels" -AssetPattern "PlutoForChannels*.exe" | Should -BeTrue
+
+        Should -Invoke -CommandName Get-ChildItem -Times 1 -Exactly -ParameterFilter {
+            $Filter -eq "PlutoForChannels*.exe"
+        }
+    }
+
+    It "returns false when the install folder exists but contains no matching file" {
+        Mock Test-Path { $true }
+        Mock Get-ChildItem { $null }
+
+        Test-WinUtilPortableGithubInstalled -Name "Pluto for Channels" -AssetPattern "PlutoForChannels*.exe" | Should -BeFalse
+    }
 }
 
 Describe "Get-WinUtilProgramUninstallString" {
@@ -124,5 +159,57 @@ Describe "Uninstall-WinUtilProgramGithub" {
         }
 
         $messages | Should -Be @("Looking up Clicker...", "Uninstalling Clicker...")
+    }
+
+    Context "portable packages (no setup wizard, never register in Add/Remove Programs)" {
+        BeforeEach {
+            Mock Get-Process { }
+            Mock Stop-Process { }
+            Mock Test-Path { $true }
+            Mock Remove-Item { }
+        }
+
+        It "stops any running instance and deletes the fixed install folder, without an Add/Remove Programs lookup" {
+            # Regression guard for the actual reported bug: Pluto for Channels' uninstall always
+            # failed with "No program matching '*Pluto for Channels*' found in Windows'
+            # Add/Remove Programs list" - confirmed via its own repo docs, this app is a
+            # standalone portable exe that never registers itself there, so that lookup could
+            # never succeed no matter what was actually installed.
+            $installDir = Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels"
+            Mock Get-Process {
+                @(
+                    [pscustomobject]@{ Id = 4242; Path = Join-Path $installDir "PlutoForChannels.exe" }
+                    [pscustomobject]@{ Id = 9999; Path = "C:\Windows\explorer.exe" }
+                )
+            }
+            $package = [pscustomobject]@{ content = "Pluto for Channels"; portable = $true }
+
+            Uninstall-WinUtilProgramGithub -Packages @($package)
+
+            Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
+            Should -Invoke -CommandName Stop-Process -Times 0 -Exactly -ParameterFilter { $Id -eq 9999 }
+            Should -Invoke -CommandName Remove-Item -Times 1 -Exactly -ParameterFilter {
+                $Path -eq $installDir -and $Recurse -eq $true -and $Force -eq $true
+            }
+            Should -Invoke -CommandName Get-WinUtilProgramUninstallString -Times 0 -Exactly
+        }
+
+        It "does not attempt to delete anything when the install folder doesn't exist" {
+            Mock Test-Path { $false }
+
+            Uninstall-WinUtilProgramGithub -Packages @([pscustomobject]@{ content = "Pluto for Channels"; portable = $true })
+
+            Should -Invoke -CommandName Remove-Item -Times 0 -Exactly
+        }
+
+        It "reports the uninstall milestone via ProgressCallback" {
+            $messages = [System.Collections.Generic.List[string]]::new()
+
+            Uninstall-WinUtilProgramGithub -Packages @([pscustomobject]@{ content = "Pluto for Channels"; portable = $true }) -ProgressCallback {
+                param($message) $messages.Add($message)
+            }
+
+            $messages | Should -Be @("Uninstalling Pluto for Channels...")
+        }
     }
 }

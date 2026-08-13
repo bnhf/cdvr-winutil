@@ -24,6 +24,7 @@ BeforeAll {
     function Test-WinUtilWebUIReachable { param($Url) $false }
     function Get-WinUtilProgramUninstallString { param($DisplayNamePattern) [pscustomobject]@{ UninstallString = $null; Reason = "not found" } }
     function Test-WinUtilNpmPackageInstalled { param($NpmPackage) $false }
+    function Test-WinUtilPortableGithubInstalled { param($Name, $AssetPattern) $false }
     function Set-WinUtilTweaksProgressIndicator { param($Visible, $Label, $Percent) }
     function Write-WinUtilLog { }
 }
@@ -169,6 +170,7 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
                 applicationsHashtable = @{
                     WPFInstallchannelsdvr = [pscustomobject]@{ installType = "direct"; content = "Channels DVR"; webui = "http://localhost:8089" }
                     WPFInstallrustdvr = [pscustomobject]@{ installType = "github"; content = "Clicker"; webui = $null }
+                    WPFInstallplutoforchannels = [pscustomobject]@{ installType = "github"; content = "Pluto for Channels"; webui = $null; portable = $true; assetPattern = "PlutoForChannels*.exe" }
                     WPFInstallolivetin = [pscustomobject]@{ installType = "wslCommand"; distro = "Debian"; installCheckCommand = "docker inspect olivetin-ezstart" }
                     WPFInstallstreamlinkmanager = [pscustomobject]@{ installType = "streamLinkManager" }
                     WPFInstallprismcast = [pscustomobject]@{ installType = "npm"; content = "Prismcast"; npmPackage = "prismcast" }
@@ -223,6 +225,27 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
 
         $result | Should -Not -Contain "WPFInstallrustdvr"
+    }
+
+    It "detects a portable github-install package via its fixed install folder, with no webui or Add/Remove Programs entry" {
+        # Regression guard for the actual reported bug: Pluto for Channels never registers in
+        # Add/Remove Programs (confirmed via its own repo docs) and its webui is only reachable
+        # while the app is actively running - both of the other two "github" signals go blind
+        # for an installed-but-not-currently-running portable app. This third signal, checking
+        # Install-WinUtilProgramGithub's own fixed per-app install folder, is what fixes that.
+        Mock Test-WinUtilPortableGithubInstalled {
+            $true
+        } -ParameterFilter { $Name -eq "Pluto for Channels" -and $AssetPattern -eq "PlutoForChannels*.exe" }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Contain "WPFInstallplutoforchannels"
+    }
+
+    It "does not report a portable github-install package as installed when its install folder check fails" {
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Not -Contain "WPFInstallplutoforchannels"
     }
 
     It "detects a wslCommand package via its installCheckCommand" {

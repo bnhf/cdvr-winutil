@@ -20,6 +20,10 @@ Function Install-WinUtilStreamLinkManager {
         location, Uninstall-WinUtilStreamLinkManager can safely remove it outright: stop the
         process, unregister the scheduled task, delete the install directory.
 
+        Both the initial launch and the at-logon scheduled task run de-elevated (standard user),
+        not inheriting WinUtil's own elevated context - see the inline comment above the
+        schtasks call for why, despite slm.bat's own script using an elevated RunLevel.
+
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists. Particularly relevant here: confirmed live, this
         specific install (a single Dropbox download + extract, no per-step feedback beyond log
@@ -76,15 +80,25 @@ Function Install-WinUtilStreamLinkManager {
                 throw "slm.exe not found in the extracted package - the upstream release layout may have changed."
             }
 
-            # Register it to start at logon, matching slm.bat's own "startup" command
-            # (schtasks .../rl highest). WinUtil already runs elevated, so - unlike slm.bat,
-            # which re-elevates separately for this - the task can be registered directly.
+            # Register it to start at logon. slm.bat's own "startup" command uses schtasks
+            # .../rl highest (elevated) - but per its own source, the ONLY thing that actually
+            # needs elevation is the separate, independently-self-elevating (-Verb RunAs) "port"
+            # command that opens a Windows Firewall rule; the app's core job (organizing local
+            # media library data, serving a local web UI) needs no admin rights at all. Running
+            # a background tray app elevated at every login, indefinitely, for no functional
+            # reason is exactly the kind of unnecessary-elevation problem WinUtil should avoid
+            # introducing on its own users' behalf, even though upstream's own script does it -
+            # /rl limited here instead, matching the same de-elevated RunLevel
+            # Start-WinUtilProcessAsStandardUserNoWait already uses for install-time launches.
             $runCommand = "powershell -NoProfile -WindowStyle Hidden -Command `"Start-Process -WindowStyle Hidden '$exePath'`""
-            & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl highest /f | Out-Null
+            & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl limited /f | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Starting $name"
             if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
-            Start-Process -WindowStyle Hidden -FilePath $exePath
+            # De-elevated for the same reason as the scheduled task above - see that comment.
+            if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $exePath)) {
+                Start-Process -WindowStyle Hidden -FilePath $exePath
+            }
 
             Write-WinUtilLog -Component "Package" -Message "$name installed and started - web interface at $($package.webui)"
         } catch {
