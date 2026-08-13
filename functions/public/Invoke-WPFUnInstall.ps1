@@ -103,10 +103,17 @@ function Invoke-WPFUnInstall {
         Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
         # See Invoke-WPFInstall.ps1's matching comment for why this exists and what it does.
-        $progressCallback = if ($hasUI) {
-            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
-        } else {
-            $null
+        # Direct's count (2) covers its higher-step uninstallViaInstaller branch - packages using
+        # its lower-step uninstallCommand branch instead just reach the package's end percent on
+        # the first (only) call, capped there rather than overshooting; see
+        # New-WinUtilStepProgressCallback's own docstring for why a mismatched count is only a
+        # cosmetic risk, not a correctness one.
+        # See Invoke-WPFInstall.ps1's matching comment for why WslCommand/WslDistro/WslFeature
+        # get a higher count than their single initial callback call - they can also ping
+        # repeatedly through -OnWaiting while a long operation is still in progress.
+        $expectedProgressSteps = @{
+            Npm = 1; Direct = 2; Github = 2; WslCommand = 6
+            StreamLinkManager = 1; WslDistro = 6; WslFeature = 6; Choco = 1
         }
 
         try {
@@ -154,25 +161,33 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco -ProgressCallback $progressCallback
+                $chocoEndPercent = [int]((($completedPackages + @($packagesChoco).Count) / $totalPackages) * 100)
+                $chocoStepCallback = if ($hasUI) {
+                    $nextChocoStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $chocoEndPercent -ExpectedSteps $expectedProgressSteps['Choco']
+                    { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextChocoStepPercent)) }
+                } else {
+                    $null
+                }
+
+                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco -ProgressCallback $chocoStepCallback
                 foreach ($r in $uninstallResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
                     }
                 }
                 $completedPackages += @($packagesChoco).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                $completedPercent = $chocoEndPercent
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Chocolatey packages ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
             foreach ($uninstallBucket in @(
-                @{ Packages = $packagesNpm; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesDirect; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesGithub; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesWslCommand; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesStreamLinkManager; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
+                @{ Packages = $packagesNpm; StepsKey = "Npm"; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesDirect; StepsKey = "Direct"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; StepsKey = "Github"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; StepsKey = "WslCommand"; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; StepsKey = "StreamLinkManager"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
                 # missing bucket is correctly treated as empty here, instead of falling through
@@ -191,10 +206,17 @@ function Invoke-WPFUnInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
-
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    $stepCallback = if ($hasUI) {
+                        $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $completedPercent -ExpectedSteps $expectedProgressSteps[$uninstallBucket.StepsKey]
+                        { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+                    } else {
+                        $null
+                    }
+
+                    & $uninstallBucket.Uninstaller @($pkg) $stepCallback
+
                     if ($hasUI) {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
                         Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
@@ -206,8 +228,8 @@ function Invoke-WPFUnInstall {
             # distro(s) itself, so running the distro bucket first just means that work is
             # already done (and skipped as a no-op) by the time the feature bucket reaches it.
             foreach ($uninstallBucket in @(
-                @{ Packages = $packagesWslDistro; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesWslFeature; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } }
+                @{ Packages = $packagesWslDistro; StepsKey = "WslDistro"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslFeature; StepsKey = "WslFeature"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
 
@@ -219,10 +241,17 @@ function Invoke-WPFUnInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
-
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    $stepCallback = if ($hasUI) {
+                        $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $completedPercent -ExpectedSteps $expectedProgressSteps[$uninstallBucket.StepsKey]
+                        { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+                    } else {
+                        $null
+                    }
+
+                    & $uninstallBucket.Uninstaller @($pkg) $stepCallback
+
                     if ($hasUI) {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
                         Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }

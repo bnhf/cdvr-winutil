@@ -76,9 +76,10 @@ Function Install-WinUtilProgramDirect {
                 #
                 # De-elevated via the fire-and-forget helper, not Start-WinUtilProcessAsStandardUser -
                 # that one waits for an exit code, and its own fallback-to-elevated-on-timeout would
-                # misfire here since not exiting is expected, not a failure. No process handle comes
-                # back from that path, so Set-WinUtilProcessForeground (which needs one) only runs on
-                # the elevated fallback - a minor, accepted UX tradeoff for launching de-elevated.
+                # misfire here since not exiting is expected, not a failure. Foregrounding the
+                # de-elevated window is handled inside Start-WinUtilProcessAsStandardUserNoWait
+                # itself (best-effort, since there's no process handle to hand it the normal way) -
+                # only the elevated fallback below needs its own explicit call.
                 if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest) {
                     Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
                 } else {

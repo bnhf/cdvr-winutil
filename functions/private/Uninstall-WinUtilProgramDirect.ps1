@@ -56,6 +56,7 @@ Function Uninstall-WinUtilProgramDirect {
             }
 
             Write-WinUtilLog -Component "Package" -Message "Launching $name installer - it should detect the existing install and offer to uninstall. Stop $name first if it's running, then choose Uninstall in the window that opens. WinUtil will not wait for it to close."
+            if ($ProgressCallback) { try { & $ProgressCallback "Launching $name uninstaller..." } catch {} }
             try {
                 if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest)) {
                     $proc = Start-Process -FilePath $dest -PassThru

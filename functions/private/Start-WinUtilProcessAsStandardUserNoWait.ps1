@@ -26,6 +26,21 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         unregisters the task definition, not the process it already spawned, the same way
         deleting a shortcut doesn't close a program already launched from it.
 
+        Also makes a best-effort attempt to bring the launched window to the foreground.
+        Confirmed live: de-elevated installer windows launched this way don't reliably get
+        Windows' automatic foreground grant (that's tied to whichever thread most recently
+        received user input, not this background runspace), so they could open without the user
+        noticing. There's no process handle to hand to Set-WinUtilProcessForeground the normal
+        way - Start-ScheduledTask doesn't return one - so this looks for a process at the exact
+        path just launched that started within the last few seconds instead. Best-effort only:
+        wrapped separately from the de-elevation contract above, since a failure here (window
+        never found, access denied reading another process's properties, ...) must never make
+        this function report $false - the caller would then treat de-elevation ITSELF as having
+        failed and launch the installer a second time, elevated, on top of the one that actually
+        did start correctly. Won't find the right window for installers that self-extract and
+        re-exec as a different process (a real limitation, not attempted here) - a miss just
+        means no foreground happens, same as before this existed.
+
     .OUTPUTS
         $true if the task was registered and started (the target was launched, though its own
         success/failure afterward is unknown - the same as calling Start-Process and not waiting).
@@ -65,6 +80,18 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         # task definition - unregistering doesn't touch the already-spawned process, but doing
         # it before Start-ScheduledTask has taken effect could plausibly race with the launch.
         Start-Sleep -Seconds 2
+
+        try {
+            $launchedProcess = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                $samePath = $false
+                try { $samePath = $_.Path -eq $FilePath } catch {}
+                $samePath -and $_.StartTime -gt (Get-Date).AddSeconds(-10)
+            } | Sort-Object StartTime -Descending | Select-Object -First 1
+
+            if ($launchedProcess) {
+                Set-WinUtilProcessForeground -Process $launchedProcess
+            }
+        } catch {}
 
         return $true
     } catch {

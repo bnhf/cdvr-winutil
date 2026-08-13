@@ -60,7 +60,14 @@ Function Install-WinUtilWSLDistro {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still installing WSL distro $distro ($($elapsedSeconds)s elapsed) - this can take several minutes, especially on a first install."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..."
+            }
         } -ScriptBlock {
             param($distro)
             try {

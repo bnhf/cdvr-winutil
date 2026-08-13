@@ -51,7 +51,14 @@ Function Uninstall-WinUtilWSLDistro {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still unregistering WSL distro $distro ($($elapsedSeconds)s elapsed)."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Unregistering $name ($($elapsedSeconds)s elapsed)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Unregistering $name ($($elapsedSeconds)s elapsed)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Unregistering $name ($($elapsedSeconds)s elapsed)..."
+            }
         } -ScriptBlock {
             param($distro)
             try {

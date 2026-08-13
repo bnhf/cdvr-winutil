@@ -146,7 +146,15 @@ Function Install-WinUtilWSLCommand {
             $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -OnWaitingIntervalSeconds 20 -OnWaiting {
                 param($elapsedSeconds)
                 Write-WinUtilLog -Component "Package" -Message "Still running $name $($Action.ToLower()) inside WSL ($($elapsedSeconds)s elapsed) - this can take a while."
-                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..."
+                # Routed through -ProgressCallback (when supplied) rather than calling
+                # Set-WinUtilTweaksProgressIndicator directly, so each periodic ping during a
+                # long wait also nudges the shared progress bar's Percent forward, not just its
+                # Label - see New-WinUtilStepProgressCallback's docstring.
+                if ($ProgressCallback) {
+                    try { & $ProgressCallback "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..." } catch {}
+                } else {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..."
+                }
             } -ScriptBlock {
                 param($distro, $scriptName)
                 try {

@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1126
+    Version        : v2026.08.13.1240
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1126"
+$sync.version = "v2026.08.13.1240"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -1653,7 +1653,14 @@ Function Install-WinUtilFeatureWSL {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still enabling WSL2 ($($elapsedSeconds)s elapsed) - this can take a while."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Enabling WSL2 ($($elapsedSeconds)s elapsed)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
+            }
         } -ScriptBlock {
             try {
                 return ((& wsl --install --no-distribution 2>&1) | ForEach-Object {
@@ -1875,9 +1882,10 @@ Function Install-WinUtilProgramDirect {
                 #
                 # De-elevated via the fire-and-forget helper, not Start-WinUtilProcessAsStandardUser -
                 # that one waits for an exit code, and its own fallback-to-elevated-on-timeout would
-                # misfire here since not exiting is expected, not a failure. No process handle comes
-                # back from that path, so Set-WinUtilProcessForeground (which needs one) only runs on
-                # the elevated fallback - a minor, accepted UX tradeoff for launching de-elevated.
+                # misfire here since not exiting is expected, not a failure. Foregrounding the
+                # de-elevated window is handled inside Start-WinUtilProcessAsStandardUserNoWait
+                # itself (best-effort, since there's no process handle to hand it the normal way) -
+                # only the elevated fallback below needs its own explicit call.
                 if (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest) {
                     Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
                 } else {
@@ -2425,7 +2433,15 @@ Function Install-WinUtilWSLCommand {
             $result = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro, $scriptName) -OnWaitingIntervalSeconds 20 -OnWaiting {
                 param($elapsedSeconds)
                 Write-WinUtilLog -Component "Package" -Message "Still running $name $($Action.ToLower()) inside WSL ($($elapsedSeconds)s elapsed) - this can take a while."
-                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..."
+                # Routed through -ProgressCallback (when supplied) rather than calling
+                # Set-WinUtilTweaksProgressIndicator directly, so each periodic ping during a
+                # long wait also nudges the shared progress bar's Percent forward, not just its
+                # Label - see New-WinUtilStepProgressCallback's docstring.
+                if ($ProgressCallback) {
+                    try { & $ProgressCallback "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..." } catch {}
+                } else {
+                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Running $name $($Action.ToLower()) ($($elapsedSeconds)s elapsed)..."
+                }
             } -ScriptBlock {
                 param($distro, $scriptName)
                 try {
@@ -2519,7 +2535,14 @@ Function Install-WinUtilWSLDistro {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still installing WSL distro $distro ($($elapsedSeconds)s elapsed) - this can take several minutes, especially on a first install."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $name ($($elapsedSeconds)s elapsed, this can take several minutes)..."
+            }
         } -ScriptBlock {
             param($distro)
             try {
@@ -5222,6 +5245,66 @@ function New-WinUtilFossBadge {
     return $badge
 }
 
+function New-WinUtilStepProgressCallback {
+    <#
+    .SYNOPSIS
+        Returns a stateful scriptblock that, called with no arguments, returns the next step's
+        percent within [StartPercent, EndPercent] - divided evenly across ExpectedSteps calls.
+
+    .DESCRIPTION
+        A pure calculator, not the actual -ProgressCallback passed to installer/uninstaller
+        functions - it has no dependency on Set-WinUtilTweaksProgressIndicator or any other
+        function, only arithmetic and its own closed-over counter state. Callers build the real
+        callback around it inline, e.g.:
+
+            $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $s -EndPercent $e -ExpectedSteps $n
+            $callback = { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+
+        Deliberately kept side-effect-free: an earlier version of this function returned the
+        fully-built -ProgressCallback directly (calling Set-WinUtilTweaksProgressIndicator
+        itself, via .GetNewClosure() to keep its counter state alive across calls). That worked
+        in the running app, where this file and Set-WinUtilTweaksProgressIndicator end up in the
+        same compiled script's top-level scope - but confirmed live under Pester, GetNewClosure
+        freezes command resolution to whatever scope existed at closure-creation time (inside
+        this function's own dot-sourced file), not the caller's scope at invocation time, so a
+        Mock of Set-WinUtilTweaksProgressIndicator set up elsewhere (e.g. a test's BeforeAll)
+        was never seen - "Set-WinUtilTweaksProgressIndicator is not recognized". Returning only
+        the numeric calculator here, with the real function call written inline in the caller's
+        own scope (a plain scriptblock, no GetNewClosure needed - it only lives long enough to
+        be used within the same loop iteration that creates it), sidesteps the problem entirely:
+        commands resolve normally, dynamically, the same way the very first version of this
+        progress-bar mechanism did before per-step tracking existed.
+
+        Divides the package's own [StartPercent, EndPercent] slot evenly across ExpectedSteps -
+        the actual number of times a given installer function calls -ProgressCallback for one
+        package, which is fixed and known per function (e.g. Install-WinUtilProgramDirect always
+        calls it exactly twice: downloading, then installing). A wrong ExpectedSteps is a
+        cosmetic risk, not a correctness one: too low and the calculator reaches EndPercent
+        early then holds there for remaining calls (capped, never exceeds); too high and it just
+        doesn't quite reach EndPercent before the caller's own authoritative
+        Set-WinUtilTweaksProgressIndicator call after the installer returns snaps it there
+        anyway.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$StartPercent,
+
+        [Parameter(Mandatory = $true)]
+        [double]$EndPercent,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedSteps
+    )
+
+    $state = [pscustomobject]@{ Step = 0 }
+    $stepSize = ($EndPercent - $StartPercent) / [Math]::Max(1, $ExpectedSteps)
+
+    return {
+        $state.Step++
+        [Math]::Min($EndPercent, $StartPercent + ($stepSize * $state.Step))
+    }.GetNewClosure()
+}
+
 function Remove-WinUtilAPPX {
     <#
 
@@ -6793,6 +6876,21 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         unregisters the task definition, not the process it already spawned, the same way
         deleting a shortcut doesn't close a program already launched from it.
 
+        Also makes a best-effort attempt to bring the launched window to the foreground.
+        Confirmed live: de-elevated installer windows launched this way don't reliably get
+        Windows' automatic foreground grant (that's tied to whichever thread most recently
+        received user input, not this background runspace), so they could open without the user
+        noticing. There's no process handle to hand to Set-WinUtilProcessForeground the normal
+        way - Start-ScheduledTask doesn't return one - so this looks for a process at the exact
+        path just launched that started within the last few seconds instead. Best-effort only:
+        wrapped separately from the de-elevation contract above, since a failure here (window
+        never found, access denied reading another process's properties, ...) must never make
+        this function report $false - the caller would then treat de-elevation ITSELF as having
+        failed and launch the installer a second time, elevated, on top of the one that actually
+        did start correctly. Won't find the right window for installers that self-extract and
+        re-exec as a different process (a real limitation, not attempted here) - a miss just
+        means no foreground happens, same as before this existed.
+
     .OUTPUTS
         $true if the task was registered and started (the target was launched, though its own
         success/failure afterward is unknown - the same as calling Start-Process and not waiting).
@@ -6832,6 +6930,18 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         # task definition - unregistering doesn't touch the already-spawned process, but doing
         # it before Start-ScheduledTask has taken effect could plausibly race with the launch.
         Start-Sleep -Seconds 2
+
+        try {
+            $launchedProcess = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                $samePath = $false
+                try { $samePath = $_.Path -eq $FilePath } catch {}
+                $samePath -and $_.StartTime -gt (Get-Date).AddSeconds(-10)
+            } | Sort-Object StartTime -Descending | Select-Object -First 1
+
+            if ($launchedProcess) {
+                Set-WinUtilProcessForeground -Process $launchedProcess
+            }
+        } catch {}
 
         return $true
     } catch {
@@ -7331,7 +7441,14 @@ Function Uninstall-WinUtilFeatureWSL {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still uninstalling WSL2 ($($elapsedSeconds)s elapsed)."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL2 ($($elapsedSeconds)s elapsed)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Uninstalling WSL2 ($($elapsedSeconds)s elapsed)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL2 ($($elapsedSeconds)s elapsed)..."
+            }
         } -ScriptBlock {
             try {
                 & wsl --shutdown 2>&1 | Out-Null
@@ -7417,6 +7534,7 @@ Function Uninstall-WinUtilProgramDirect {
             }
 
             Write-WinUtilLog -Component "Package" -Message "Launching $name installer - it should detect the existing install and offer to uninstall. Stop $name first if it's running, then choose Uninstall in the window that opens. WinUtil will not wait for it to close."
+            if ($ProgressCallback) { try { & $ProgressCallback "Launching $name uninstaller..." } catch {} }
             try {
                 if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $dest)) {
                     $proc = Start-Process -FilePath $dest -PassThru
@@ -7596,7 +7714,14 @@ Function Uninstall-WinUtilWSLDistro {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still unregistering WSL distro $distro ($($elapsedSeconds)s elapsed)."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Unregistering $name ($($elapsedSeconds)s elapsed)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Unregistering $name ($($elapsedSeconds)s elapsed)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Unregistering $name ($($elapsedSeconds)s elapsed)..."
+            }
         } -ScriptBlock {
             param($distro)
             try {
@@ -8792,17 +8917,25 @@ function Invoke-WPFInstall {
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
-        # Passed to every bucket installer below so their existing milestone log lines (download
-        # started, extracting, installing, ...) also update the shared progress label - without
-        # this, a single-package bucket showed one static label for however long the whole
-        # install took (confirmed live: Streaming Library Manager looked frozen at 0% the entire
-        # time). Only updates the Label, not Percent - Percent is still driven by whole-package
-        # completion below, this just proves the app is actually still doing something between
-        # those points. $null when there's no UI to update (e.g. -Preset/-Config unattended runs).
-        $progressCallback = if ($hasUI) {
-            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
-        } else {
-            $null
+        # How many times a given installer function calls -ProgressCallback for one package -
+        # New-WinUtilStepProgressCallback divides that package's percent slot evenly across this
+        # many steps, so the bar actually advances as each milestone fires instead of sitting at
+        # its starting value until the whole package finishes (confirmed live: labels were
+        # updating correctly, but Percent only ever moved at package boundaries - a multi-step
+        # single-package install, e.g. Streaming Library Manager, looked exactly like the
+        # original "frozen bar" bug this was meant to fix). Must match each function's own call
+        # count exactly to line up cleanly - see New-WinUtilStepProgressCallback's docstring for
+        # what happens when it doesn't (harmless, just less precise).
+        # WslFeature/WslDistro/WslCommand can call back repeatedly (an initial "Running..."
+        # message, then again every OnWaitingIntervalSeconds while a long operation is still in
+        # progress) - a higher count here means the bar keeps creeping forward through several
+        # of those pings instead of reaching this package's end percent on the very first one
+        # and just holding there (harmless either way, see New-WinUtilStepProgressCallback's
+        # docstring, but capping too early looks the same as not advancing at all).
+        $expectedProgressSteps = @{
+            WslFeature = 6; WslDistro = 6; WslCommand = 6
+            Direct = 2; Github = 3; Npm = 1; StreamLinkManager = 4
+            Choco = 1
         }
 
         try {
@@ -8821,8 +8954,8 @@ function Invoke-WPFInstall {
             # unconditionally first and the WSL feature/distro buckets only ran afterward as
             # part of the general bucket loop below.
             foreach ($installBucket in @(
-                @{ Packages = $packagesWslFeature; Installer = { param($pkgs, $cb) Install-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesWslDistro; Installer = { param($pkgs, $cb) Install-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } }
+                @{ Packages = $packagesWslFeature; StepsKey = "WslFeature"; Installer = { param($pkgs, $cb) Install-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslDistro; StepsKey = "WslDistro"; Installer = { param($pkgs, $cb) Install-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
                 # missing bucket is correctly treated as empty here, instead of falling through
@@ -8842,10 +8975,21 @@ function Invoke-WPFInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $pkgName ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    & $installBucket.Installer @($pkg) $progressCallback
-
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    # $stepCallback is a plain (non-closure) inline scriptblock, not returned
+                    # from a helper - see New-WinUtilStepProgressCallback's own docstring for why
+                    # that matters (a GetNewClosure'd scriptblock calling
+                    # Set-WinUtilTweaksProgressIndicator by name broke under Pester).
+                    $stepCallback = if ($hasUI) {
+                        $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $completedPercent -ExpectedSteps $expectedProgressSteps[$installBucket.StepsKey]
+                        { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+                    } else {
+                        $null
+                    }
+
+                    & $installBucket.Installer @($pkg) $stepCallback
+
                     if ($hasUI) {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
                         Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
@@ -8892,8 +9036,16 @@ function Invoke-WPFInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
+                $chocoEndPercent = [int]((($completedPackages + @($packagesChoco).Count) / $totalPackages) * 100)
+                $chocoStepCallback = if ($hasUI) {
+                    $nextChocoStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $chocoEndPercent -ExpectedSteps $expectedProgressSteps['Choco']
+                    { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextChocoStepPercent)) }
+                } else {
+                    $null
+                }
+
                 Install-WinUtilChoco
-                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco -ProgressCallback $progressCallback
+                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco -ProgressCallback $chocoStepCallback
                 foreach ($r in $installResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
@@ -8909,7 +9061,7 @@ function Invoke-WPFInstall {
                     }
                 }
                 $completedPackages += @($packagesChoco).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                $completedPercent = $chocoEndPercent
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed Chocolatey packages ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
@@ -8917,11 +9069,11 @@ function Invoke-WPFInstall {
             }
 
             foreach ($installBucket in @(
-                @{ Packages = $packagesDirect; Installer = { param($pkgs, $cb) Install-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesGithub; Installer = { param($pkgs, $cb) Install-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesNpm; Installer = { param($pkgs, $cb) Install-WinUtilProgramNpm -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesWslCommand; Installer = { param($pkgs, $cb) Install-WinUtilWSLCommand -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesStreamLinkManager; Installer = { param($pkgs, $cb) Install-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
+                @{ Packages = $packagesDirect; StepsKey = "Direct"; Installer = { param($pkgs, $cb) Install-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; StepsKey = "Github"; Installer = { param($pkgs, $cb) Install-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesNpm; StepsKey = "Npm"; Installer = { param($pkgs, $cb) Install-WinUtilProgramNpm -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; StepsKey = "WslCommand"; Installer = { param($pkgs, $cb) Install-WinUtilWSLCommand -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; StepsKey = "StreamLinkManager"; Installer = { param($pkgs, $cb) Install-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - see the WSL bucket loop above for why this matters.
                 $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
@@ -8936,10 +9088,17 @@ function Invoke-WPFInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $pkgName ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    & $installBucket.Installer @($pkg) $progressCallback
-
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    $stepCallback = if ($hasUI) {
+                        $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $completedPercent -ExpectedSteps $expectedProgressSteps[$installBucket.StepsKey]
+                        { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+                    } else {
+                        $null
+                    }
+
+                    & $installBucket.Installer @($pkg) $stepCallback
+
                     if ($hasUI) {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
                         Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
@@ -10206,10 +10365,17 @@ function Invoke-WPFUnInstall {
         Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
         # See Invoke-WPFInstall.ps1's matching comment for why this exists and what it does.
-        $progressCallback = if ($hasUI) {
-            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
-        } else {
-            $null
+        # Direct's count (2) covers its higher-step uninstallViaInstaller branch - packages using
+        # its lower-step uninstallCommand branch instead just reach the package's end percent on
+        # the first (only) call, capped there rather than overshooting; see
+        # New-WinUtilStepProgressCallback's own docstring for why a mismatched count is only a
+        # cosmetic risk, not a correctness one.
+        # See Invoke-WPFInstall.ps1's matching comment for why WslCommand/WslDistro/WslFeature
+        # get a higher count than their single initial callback call - they can also ping
+        # repeatedly through -OnWaiting while a long operation is still in progress.
+        $expectedProgressSteps = @{
+            Npm = 1; Direct = 2; Github = 2; WslCommand = 6
+            StreamLinkManager = 1; WslDistro = 6; WslFeature = 6; Choco = 1
         }
 
         try {
@@ -10257,25 +10423,33 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco -ProgressCallback $progressCallback
+                $chocoEndPercent = [int]((($completedPackages + @($packagesChoco).Count) / $totalPackages) * 100)
+                $chocoStepCallback = if ($hasUI) {
+                    $nextChocoStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $chocoEndPercent -ExpectedSteps $expectedProgressSteps['Choco']
+                    { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextChocoStepPercent)) }
+                } else {
+                    $null
+                }
+
+                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco -ProgressCallback $chocoStepCallback
                 foreach ($r in $uninstallResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
                     }
                 }
                 $completedPackages += @($packagesChoco).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                $completedPercent = $chocoEndPercent
                 if ($hasUI) {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Chocolatey packages ($completedPackages/$totalPackages)" -Percent $completedPercent
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
             foreach ($uninstallBucket in @(
-                @{ Packages = $packagesNpm; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesDirect; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesGithub; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesWslCommand; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesStreamLinkManager; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
+                @{ Packages = $packagesNpm; StepsKey = "Npm"; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesDirect; StepsKey = "Direct"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; StepsKey = "Github"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; StepsKey = "WslCommand"; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; StepsKey = "StreamLinkManager"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
                 # missing bucket is correctly treated as empty here, instead of falling through
@@ -10294,10 +10468,17 @@ function Invoke-WPFUnInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
-
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    $stepCallback = if ($hasUI) {
+                        $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $completedPercent -ExpectedSteps $expectedProgressSteps[$uninstallBucket.StepsKey]
+                        { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+                    } else {
+                        $null
+                    }
+
+                    & $uninstallBucket.Uninstaller @($pkg) $stepCallback
+
                     if ($hasUI) {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
                         Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
@@ -10309,8 +10490,8 @@ function Invoke-WPFUnInstall {
             # distro(s) itself, so running the distro bucket first just means that work is
             # already done (and skipped as a no-op) by the time the feature bucket reaches it.
             foreach ($uninstallBucket in @(
-                @{ Packages = $packagesWslDistro; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } },
-                @{ Packages = $packagesWslFeature; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } }
+                @{ Packages = $packagesWslDistro; StepsKey = "WslDistro"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslFeature; StepsKey = "WslFeature"; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
 
@@ -10322,10 +10503,17 @@ function Invoke-WPFUnInstall {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
                     }
 
-                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
-
                     $completedPackages++
                     $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    $stepCallback = if ($hasUI) {
+                        $nextStepPercent = New-WinUtilStepProgressCallback -StartPercent $startPercent -EndPercent $completedPercent -ExpectedSteps $expectedProgressSteps[$uninstallBucket.StepsKey]
+                        { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message -Percent ([int](& $nextStepPercent)) }
+                    } else {
+                        $null
+                    }
+
+                    & $uninstallBucket.Uninstaller @($pkg) $stepCallback
+
                     if ($hasUI) {
                         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
                         Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }

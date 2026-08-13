@@ -39,7 +39,14 @@ Function Install-WinUtilFeatureWSL {
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
             Write-WinUtilLog -Component "Package" -Message "Still enabling WSL2 ($($elapsedSeconds)s elapsed) - this can take a while."
-            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
+            # Routed through -ProgressCallback (when supplied) so each periodic ping during a
+            # long wait also nudges the shared progress bar's Percent forward, not just its
+            # Label - see New-WinUtilStepProgressCallback's docstring.
+            if ($ProgressCallback) {
+                try { & $ProgressCallback "Enabling WSL2 ($($elapsedSeconds)s elapsed)..." } catch {}
+            } else {
+                Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Enabling WSL2 ($($elapsedSeconds)s elapsed)..."
+            }
         } -ScriptBlock {
             try {
                 return ((& wsl --install --no-distribution 2>&1) | ForEach-Object {

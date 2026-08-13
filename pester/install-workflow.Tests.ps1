@@ -9,6 +9,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPackagesInDependencyOrder.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPrerequisites.ps1")
     . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilPackagePrompts.ps1")
+    . (Join-Path $script:repoRoot "functions\private\New-WinUtilStepProgressCallback.ps1")
     . (Join-Path $script:repoRoot "functions\public\Invoke-WPFInstall.ps1")
     . (Join-Path $script:repoRoot "functions\public\Invoke-WPFUnInstall.ps1")
 
@@ -494,7 +495,16 @@ Describe "Invoke-WPFInstall runspace body" {
         }
     }
 
-    It "passes a working ProgressCallback into each installer so its own milestones update the shared label" {
+    It "advances Percent (not just Label) as an installer reports each of its own milestones" {
+        # Regression guard for the actual reported bug: an earlier version of this wiring only
+        # updated Label on each -ProgressCallback call, leaving Percent frozen at the package's
+        # starting value until the whole package finished and jumped straight to the next one -
+        # confirmed live, this looked identical to the original "frozen bar" bug it was meant to
+        # fix, just with the label text changing underneath a still-static bar. Direct-type
+        # packages report exactly 2 milestones (downloading, installing), so with this package
+        # alone occupying the full [0, 100] slot, each call should land on 50 and 100 exactly -
+        # the same even division "Show Installed Apps" uses per app, not a partial nudge that
+        # never actually reaches the package's own end percent.
         $pkg = [pscustomobject]@{ content = "AppA"; url = "https://example.com/a.exe" }
         Mock Get-WinUtilSelectedPackages {
             New-WinUtilPackageSplit -Direct @($pkg)
@@ -502,13 +512,17 @@ Describe "Invoke-WPFInstall runspace body" {
         Mock Install-WinUtilProgramDirect {
             param($Packages, $ProgressCallback)
             & $ProgressCallback "Downloading AppA..."
+            & $ProgressCallback "Installing AppA..."
         }
 
         Invoke-WPFInstall
         & $script:capturedInstallScriptBlock -PackagesToInstall @($script:package) -ManagerPreference "Winget"
 
         Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
-            $Visible -eq $true -and $Label -eq "Downloading AppA..."
+            $Visible -eq $true -and $Label -eq "Downloading AppA..." -and $Percent -eq 50
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "Installing AppA..." -and $Percent -eq 100
         }
     }
 
@@ -768,7 +782,14 @@ Describe "Invoke-WPFUnInstall runspace body" {
         }
     }
 
-    It "passes a working ProgressCallback into each uninstaller so its own milestones update the shared label" {
+    It "advances Percent (not just Label) as an uninstaller reports its own milestones" {
+        # Regression guard for the actual reported bug - see Invoke-WPFInstall's matching test
+        # for the full explanation. Direct's uninstall ExpectedSteps is 2 (covering its
+        # higher-step uninstallViaInstaller branch), but this package's uninstallCommand branch
+        # only ever calls back once - landing on 50, not 100, is the documented, accepted
+        # imprecision for that mismatch (New-WinUtilStepProgressCallback's own docstring), not a
+        # bug: the caller's own authoritative "Uninstalled AppA (1/1)" call right after this
+        # still snaps Percent to the real end value regardless.
         $pkg = [pscustomobject]@{ content = "AppA"; uninstallCommand = "Remove-Item C:\AppA" }
         Mock Get-WinUtilSelectedPackages {
             New-WinUtilPackageSplit -Direct @($pkg)
@@ -782,7 +803,10 @@ Describe "Invoke-WPFUnInstall runspace body" {
         & $script:capturedUninstallScriptBlock -PackagesToUninstall @($script:package) -ManagerPreference "Winget"
 
         Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
-            $Visible -eq $true -and $Label -eq "Uninstalling AppA..."
+            $Visible -eq $true -and $Label -eq "Uninstalling AppA..." -and $Percent -eq 50
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Uninstalled AppA (1/1)" -and $Percent -eq 100
         }
     }
 
