@@ -8,6 +8,19 @@ Function Install-WinUtilProgramGithub {
         De-elevated the same way, and for the same reason, as Install-WinUtilProgramDirect -
         see that function's own docstring. ProgressCallback works the same way too - see that
         function's docstring for why it exists.
+
+        postInstallCommand runs after a successful install, same idea as the winget/choco/npm
+        paths (a raw PowerShell command string, executed via [scriptblock]::Create) - added for
+        Clicker specifically, whose Rust/WinUI3 executable needs the Microsoft Visual C++
+        Redistributable to actually run ("VCRUNTIME140.dll was not found" otherwise), which
+        Clicker's own installer doesn't bundle or check for. Handled here rather than via a
+        separate "requires" catalog entry, since that would surface as its own visible/
+        selectable checkbox rather than something silently pulled in as part of installing
+        Clicker. For the MSI branch, only runs if msiexec reported success; for the no-args
+        interactive branch, runs regardless, since that launch is fire-and-forget and never
+        gives a reliable success signal to gate on - installing the redistributable in parallel
+        is idempotent and harmless even if the user hasn't finished Clicker's own setup wizard
+        yet by the time it runs.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -70,9 +83,19 @@ Function Install-WinUtilProgramGithub {
         if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             if ($dest -like "*.msi") {
-                Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`"") | Out-Null
+                $process = Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`"")
                 Write-WinUtilLog -Component "Package" -Message "$name installed."
                 Remove-Item $dest -Force -ErrorAction SilentlyContinue
+
+                if ($process.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($package.postInstallCommand)) {
+                    Write-WinUtilLog -Component "Package" -Message "Running post-install step for $name`: $($package.postInstallCommand)"
+                    try {
+                        & ([scriptblock]::Create($package.postInstallCommand))
+                        Write-WinUtilLog -Component "Package" -Message "$name post-install step completed"
+                    } catch {
+                        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
+                    }
+                }
             } else {
                 # No known silent-install flag for these community-released installers, so this
                 # runs interactively - and some interactive installers launch a long-running
@@ -85,6 +108,16 @@ Function Install-WinUtilProgramGithub {
                     $proc = Start-Process -FilePath $dest -PassThru
                     Set-WinUtilProcessForeground -Process $proc
                     Write-WinUtilLog -Component "Package" -Message "$name installer launched - it may need you to finish a setup wizard. WinUtil will not wait for it to close."
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($package.postInstallCommand)) {
+                    Write-WinUtilLog -Component "Package" -Message "Running post-install step for $name`: $($package.postInstallCommand)"
+                    try {
+                        & ([scriptblock]::Create($package.postInstallCommand))
+                        Write-WinUtilLog -Component "Package" -Message "$name post-install step completed"
+                    } catch {
+                        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Post-install step failed for ${name}: $_"
+                    }
                 }
             }
         } catch {

@@ -287,6 +287,19 @@ Describe "Olivetin application config" {
     }
 }
 
+Describe "Clicker application config" {
+    # Regression guard: confirmed live, Clicker's Rust/WinUI3 executable fails to launch with
+    # "VCRUNTIME140.dll was not found" without the VC++ Redistributable, which its own installer
+    # doesn't bundle or check for - this silently pulls it in via postInstallCommand rather than
+    # a separate visible catalog entry.
+    It "silently installs the VC++ Redistributable after Clicker installs" {
+        $rustdvr = (Get-WinUtilConfigObject -Name "applications").rustdvr
+
+        $rustdvr.postInstallCommand | Should -Match ([regex]::Escape("Microsoft.VCRedist.2015+.x64"))
+        $rustdvr.postInstallCommand | Should -Match "--silent"
+    }
+}
+
 Describe "App navigation config" {
     It "is wired to an existing XAML target grid" {
         $mainScript = Get-Content -Path $script:mainScriptPath -Raw

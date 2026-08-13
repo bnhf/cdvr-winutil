@@ -221,4 +221,64 @@ Describe "Install-WinUtilProgramGithub" {
 
         $messages | Should -Be @("Checking latest release for Clicker...", "Downloading Clicker...", "Installing Clicker...")
     }
+
+    It "runs postInstallCommand after the no-args interactive install branch" {
+        # Regression guard: Clicker's Rust/WinUI3 executable needs the VC++ Redistributable to
+        # run at all ("VCRUNTIME140.dll was not found" otherwise) - this is how it gets pulled
+        # in silently as part of installing Clicker, rather than as a separate visible catalog
+        # entry. The interactive branch's launch is fire-and-forget with no success signal to
+        # gate on, so this must run regardless, not just when something reports success.
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+        $package = [pscustomobject]@{
+            content = "Clicker"; repo = "mackid1993/Clicker"; assetPattern = "Clicker-Setup-*.exe"
+            postInstallCommand = 'Set-Variable -Name postInstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramGithub -Packages @($package)
+
+        $script:postInstallRan | Should -BeTrue
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "runs postInstallCommand after a successful MSI install" {
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                assets = @([pscustomobject]@{ name = "App-Setup.msi"; browser_download_url = "https://example.com/App-Setup.msi" })
+            }
+        }
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+        $package = [pscustomobject]@{
+            content = "App"; repo = "someone/app"; assetPattern = "App-Setup.msi"
+            postInstallCommand = 'Set-Variable -Name postInstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramGithub -Packages @($package)
+
+        $script:postInstallRan | Should -BeTrue
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "does not run postInstallCommand after a failed MSI install" {
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                assets = @([pscustomobject]@{ name = "App-Setup.msi"; browser_download_url = "https://example.com/App-Setup.msi" })
+            }
+        }
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 1603 } }
+        Remove-Variable -Name postInstallRan -Scope Script -ErrorAction SilentlyContinue
+        $package = [pscustomobject]@{
+            content = "App"; repo = "someone/app"; assetPattern = "App-Setup.msi"
+            postInstallCommand = 'Set-Variable -Name postInstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramGithub -Packages @($package)
+
+        $script:postInstallRan | Should -BeNullOrEmpty
+    }
+
+    It "does not require a postInstallCommand" {
+        $package = [pscustomobject]@{ content = "Clicker"; repo = "mackid1993/Clicker"; assetPattern = "Clicker-Setup-*.exe" }
+
+        { Install-WinUtilProgramGithub -Packages @($package) } | Should -Not -Throw
+    }
 }
