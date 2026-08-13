@@ -16,11 +16,22 @@ function Open-WinUtilLink {
         differently, and it needlessly runs untrusted web content with an admin token).
 
         De-elevated via Start-WinUtilProcessAsStandardUserNoWait, the same scheduled-task
-        technique already used for de-elevating installer launches - Task Scheduler's "start a
-        program" action resolves its target through the same shell association mechanism as
-        Start-Process, so a URL or shell:AppsFolder path works here exactly like a plain .exe
-        path does elsewhere. Falls back to a normal (elevated) Start-Process if de-elevation
-        itself fails, so a link still opens rather than silently doing nothing.
+        technique already used for de-elevating installer launches - but routed through
+        explorer.exe as the actual Execute target, with Target passed as its argument, rather
+        than passing Target directly as -FilePath. An earlier version did the latter, reasoning
+        that Task Scheduler's "start a program" action would resolve a URL or shell:AppsFolder
+        path via the same shell-association mechanism Start-Process uses - confirmed live that
+        this was simply wrong: Task Scheduler's action model expects a real, literal executable
+        file and fails with ERROR_FILE_NOT_FOUND for a bare URL, which broke every "Open"/"Info"
+        button and every dialog hyperlink using a URL (the majority of them - most apps declare
+        a "webui" URL, not a Start Menu shortcut) while silently reporting success, since
+        Start-ScheduledTask only confirms the task started, not that its action actually ran.
+        explorer.exe is a real executable Task Scheduler CAN launch directly, and explorer.exe
+        itself resolves a URL or shell:AppsFolder argument exactly the way Start-Process would
+        (confirmed live: this actually opens the target in the default browser/app). Falls back
+        to a normal (elevated) Start-Process on $Target directly if de-elevation itself fails -
+        that path was never broken, since Start-Process has always correctly resolved URLs and
+        shell paths on its own.
     #>
     param(
         # Not Mandatory: PowerShell's own Mandatory-parameter binding rejects an empty string
@@ -34,7 +45,7 @@ function Open-WinUtilLink {
         return
     }
 
-    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $Target)) {
+    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "$env:WINDIR\explorer.exe" -ArgumentList @($Target))) {
         Start-Process -FilePath $Target
     }
 }

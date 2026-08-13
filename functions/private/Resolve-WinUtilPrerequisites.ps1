@@ -33,7 +33,7 @@ function Resolve-WinUtilPrerequisites {
     }
     if ($needsWsl2.Count -gt 0 -and (Test-WinUtilVirtualizationFirmwareEnabled) -eq $false) {
         $names = ($needsWsl2 | ForEach-Object { $_.content }) -join ", "
-        [void](Show-WinUtilMessage -Message "WSL2 requires hardware virtualization (Intel VT-x / AMD-V), which appears to be disabled in this PC's BIOS/UEFI firmware settings. Enable it there, then try again.`n`nSkipping: $names" -Title "Virtualization is disabled" -Button ([System.Windows.MessageBoxButton]::OK) -Icon "Warning")
+        [void](Show-CustomDialog -Title "Virtualization is disabled" -Message "WSL2 requires hardware virtualization (Intel VT-x / AMD-V), which appears to be disabled in this PC's BIOS/UEFI firmware settings. Enable it there, then try again.`n`nSkipping: $names")
         Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping WSL2-dependent packages - hardware virtualization firmware appears disabled: $names"
         foreach ($p in $needsWsl2) {
             [void]$result.Remove($p)
@@ -70,9 +70,14 @@ function Resolve-WinUtilPrerequisites {
         if ($missing.Count -eq 0) { continue }
 
         $names = ($missing | ForEach-Object { $_.Entry.content }) -join ", "
-        $response = Show-WinUtilMessage -Message "$($package.content) requires: $names`n`nInstall these now too?" -Title "Missing prerequisites" -Button ([System.Windows.MessageBoxButton]::YesNo) -Icon "Question"
+        # Matches Invoke-WPFUnInstall.ps1's own uninstall confirmation - a real Name/Description
+        # row per app instead of a plain comma-joined name list, via the same themed dialog
+        # rather than a native MessageBox that looks visibly out of place appearing mid-flow
+        # right next to it.
+        $missingItems = $missing | Select-Object @{Name='Name'; Expression={$_.Entry.content}}, @{Name='Description'; Expression={$_.Entry.description}}
+        $response = Show-CustomDialog -Title "Missing prerequisites" -Message "$($package.content) requires the following - install these now too?" -Items $missingItems -Buttons YesNo -Width 480 -Height 420 -EnableScroll $true
 
-        if ($response -eq [System.Windows.MessageBoxResult]::Yes) {
+        if ($response -eq "Yes") {
             foreach ($m in $missing) {
                 if ($queuedKeys.Contains([string]$m.Key)) { continue }
                 $entryWithKey = $m.Entry | Add-Member -NotePropertyName Key -NotePropertyValue $m.Key -PassThru -Force
@@ -100,7 +105,7 @@ function Resolve-WinUtilPrerequisites {
         }
         if ($wslDependents.Count -gt 0) {
             $names = ($wslDependents | ForEach-Object { $_.content }) -join ", "
-            [void](Show-WinUtilMessage -Message "WSL2 needs a system restart before it can actually be used - installing it and then immediately installing $names in the same run is likely to fail. This run will enable WSL2 only.`n`nRestart your PC, then come back and install: $names" -Title "Restart required for WSL2" -Button ([System.Windows.MessageBoxButton]::OK) -Icon "Warning")
+            [void](Show-CustomDialog -Title "Restart required for WSL2" -Message "WSL2 needs a system restart before it can actually be used - installing it and then immediately installing $names in the same run is likely to fail. This run will enable WSL2 only.`n`nRestart your PC, then come back and install: $names")
             Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping WSL2-dependent packages this run - WSL2 was not already enabled and typically needs a restart first: $names"
             foreach ($p in $wslDependents) {
                 [void]$result.Remove($p)

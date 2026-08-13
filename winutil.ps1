@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1643
+    Version        : v2026.08.13.1746
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1643"
+$sync.version = "v2026.08.13.1746"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -5540,11 +5540,22 @@ function Open-WinUtilLink {
         differently, and it needlessly runs untrusted web content with an admin token).
 
         De-elevated via Start-WinUtilProcessAsStandardUserNoWait, the same scheduled-task
-        technique already used for de-elevating installer launches - Task Scheduler's "start a
-        program" action resolves its target through the same shell association mechanism as
-        Start-Process, so a URL or shell:AppsFolder path works here exactly like a plain .exe
-        path does elsewhere. Falls back to a normal (elevated) Start-Process if de-elevation
-        itself fails, so a link still opens rather than silently doing nothing.
+        technique already used for de-elevating installer launches - but routed through
+        explorer.exe as the actual Execute target, with Target passed as its argument, rather
+        than passing Target directly as -FilePath. An earlier version did the latter, reasoning
+        that Task Scheduler's "start a program" action would resolve a URL or shell:AppsFolder
+        path via the same shell-association mechanism Start-Process uses - confirmed live that
+        this was simply wrong: Task Scheduler's action model expects a real, literal executable
+        file and fails with ERROR_FILE_NOT_FOUND for a bare URL, which broke every "Open"/"Info"
+        button and every dialog hyperlink using a URL (the majority of them - most apps declare
+        a "webui" URL, not a Start Menu shortcut) while silently reporting success, since
+        Start-ScheduledTask only confirms the task started, not that its action actually ran.
+        explorer.exe is a real executable Task Scheduler CAN launch directly, and explorer.exe
+        itself resolves a URL or shell:AppsFolder argument exactly the way Start-Process would
+        (confirmed live: this actually opens the target in the default browser/app). Falls back
+        to a normal (elevated) Start-Process on $Target directly if de-elevation itself fails -
+        that path was never broken, since Start-Process has always correctly resolved URLs and
+        shell paths on its own.
     #>
     param(
         # Not Mandatory: PowerShell's own Mandatory-parameter binding rejects an empty string
@@ -5558,7 +5569,7 @@ function Open-WinUtilLink {
         return
     }
 
-    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $Target)) {
+    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "$env:WINDIR\explorer.exe" -ArgumentList @($Target))) {
         Start-Process -FilePath $Target
     }
 }
@@ -5806,7 +5817,7 @@ function Resolve-WinUtilPrerequisites {
     }
     if ($needsWsl2.Count -gt 0 -and (Test-WinUtilVirtualizationFirmwareEnabled) -eq $false) {
         $names = ($needsWsl2 | ForEach-Object { $_.content }) -join ", "
-        [void](Show-WinUtilMessage -Message "WSL2 requires hardware virtualization (Intel VT-x / AMD-V), which appears to be disabled in this PC's BIOS/UEFI firmware settings. Enable it there, then try again.`n`nSkipping: $names" -Title "Virtualization is disabled" -Button ([System.Windows.MessageBoxButton]::OK) -Icon "Warning")
+        [void](Show-CustomDialog -Title "Virtualization is disabled" -Message "WSL2 requires hardware virtualization (Intel VT-x / AMD-V), which appears to be disabled in this PC's BIOS/UEFI firmware settings. Enable it there, then try again.`n`nSkipping: $names")
         Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping WSL2-dependent packages - hardware virtualization firmware appears disabled: $names"
         foreach ($p in $needsWsl2) {
             [void]$result.Remove($p)
@@ -5843,9 +5854,14 @@ function Resolve-WinUtilPrerequisites {
         if ($missing.Count -eq 0) { continue }
 
         $names = ($missing | ForEach-Object { $_.Entry.content }) -join ", "
-        $response = Show-WinUtilMessage -Message "$($package.content) requires: $names`n`nInstall these now too?" -Title "Missing prerequisites" -Button ([System.Windows.MessageBoxButton]::YesNo) -Icon "Question"
+        # Matches Invoke-WPFUnInstall.ps1's own uninstall confirmation - a real Name/Description
+        # row per app instead of a plain comma-joined name list, via the same themed dialog
+        # rather than a native MessageBox that looks visibly out of place appearing mid-flow
+        # right next to it.
+        $missingItems = $missing | Select-Object @{Name='Name'; Expression={$_.Entry.content}}, @{Name='Description'; Expression={$_.Entry.description}}
+        $response = Show-CustomDialog -Title "Missing prerequisites" -Message "$($package.content) requires the following - install these now too?" -Items $missingItems -Buttons YesNo -Width 480 -Height 420 -EnableScroll $true
 
-        if ($response -eq [System.Windows.MessageBoxResult]::Yes) {
+        if ($response -eq "Yes") {
             foreach ($m in $missing) {
                 if ($queuedKeys.Contains([string]$m.Key)) { continue }
                 $entryWithKey = $m.Entry | Add-Member -NotePropertyName Key -NotePropertyValue $m.Key -PassThru -Force
@@ -5873,7 +5889,7 @@ function Resolve-WinUtilPrerequisites {
         }
         if ($wslDependents.Count -gt 0) {
             $names = ($wslDependents | ForEach-Object { $_.content }) -join ", "
-            [void](Show-WinUtilMessage -Message "WSL2 needs a system restart before it can actually be used - installing it and then immediately installing $names in the same run is likely to fail. This run will enable WSL2 only.`n`nRestart your PC, then come back and install: $names" -Title "Restart required for WSL2" -Button ([System.Windows.MessageBoxButton]::OK) -Icon "Warning")
+            [void](Show-CustomDialog -Title "Restart required for WSL2" -Message "WSL2 needs a system restart before it can actually be used - installing it and then immediately installing $names in the same run is likely to fail. This run will enable WSL2 only.`n`nRestart your PC, then come back and install: $names")
             Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping WSL2-dependent packages this run - WSL2 was not already enabled and typically needs a restart first: $names"
             foreach ($p in $wslDependents) {
                 [void]$result.Remove($p)
