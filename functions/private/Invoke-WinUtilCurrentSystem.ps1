@@ -100,6 +100,15 @@ Function Invoke-WinUtilCurrentSystem {
                         Write-Output $entry.Key
                     }
                 }
+                "streamLinkManager" {
+                    # Install-WinUtilStreamLinkManager.ps1 always installs to this exact fixed
+                    # location (it owns the whole directory, not something the user chooses) -
+                    # checking the file directly is more reliable than probing "webui", which
+                    # only proves the app is currently running, not that it's installed.
+                    if (Test-Path (Join-Path $env:LocalAppData "StreamLinkManager\slm.exe")) {
+                        Write-Output $entry.Key
+                    }
+                }
             }
         }
         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Finished checking installed apps" -Percent 100

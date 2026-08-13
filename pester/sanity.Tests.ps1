@@ -196,11 +196,14 @@ Describe "Compiled WinUtil sanity" {
     }
 
     It "replaces the generated build date placeholder" {
+        # Only the date portion is pinned to an exact value, not the HHmm time - compiling and
+        # running this test can straddle a minute boundary (unlike a day boundary, which isn't
+        # a realistic risk within one test run), and an exact-time match would then flake.
         $content = Get-Content -Path $script:compiledPath -Raw
-        $expectedBuildDate = Get-Date -Format "yy.MM.dd"
+        $expectedBuildDatePrefix = Get-Date -Format "yyyy.MM.dd"
 
         $content | Should -Not -Match ([regex]::Escape("#{replaceme}"))
-        $content | Should -Match ([regex]::Escape('$sync.version = "' + $expectedBuildDate + '"'))
+        $content | Should -Match ([regex]::Escape('$sync.version = "v' + $expectedBuildDatePrefix + '.') + '\d{4}"')
     }
 }
 

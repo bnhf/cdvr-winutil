@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : 26.08.12
+    Version        : v2026.08.13.0942
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "26.08.12"
+$sync.version = "v2026.08.13.0942"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2748,6 +2748,15 @@ Function Invoke-WinUtilCurrentSystem {
                     # when one is declared. Entries with neither (e.g. Clicker) can't be detected
                     # this way and are left unchecked, same as before this fix.
                     if ($entry.Value.webui -and (Test-WinUtilWebUIReachable -Url $entry.Value.webui)) {
+                        Write-Output $entry.Key
+                    }
+                }
+                "streamLinkManager" {
+                    # Install-WinUtilStreamLinkManager.ps1 always installs to this exact fixed
+                    # location (it owns the whole directory, not something the user chooses) -
+                    # checking the file directly is more reliable than probing "webui", which
+                    # only proves the app is currently running, not that it's installed.
+                    if (Test-Path (Join-Path $env:LocalAppData "StreamLinkManager\slm.exe")) {
                         Write-Output $entry.Key
                     }
                 }
@@ -10516,7 +10525,7 @@ $sync.configs.applications = @'
     "content": "VLC",
     "description": "VLC media player is a free, open-source, cross-platform multimedia player that plays most local video/audio files and discs, by VideoLAN.",
     "link": "https://www.videolan.org/vlc/",
-    "icon": "https://images.videolan.org/images/favicon.ico",
+    "icon": "https://raw.githubusercontent.com/bnhf/cdvr-winutil/main/assets/app-icons/vlc.png",
     "handle": "VideoLAN",
     "winget": "VideoLAN.VLC",
     "foss": true
@@ -15231,8 +15240,8 @@ function Write-WinUtilBannerLine {
 }
 
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor DarkGray
-Write-WinUtilBannerLine -Text "CDVR WinUtil v$($sync.version)" -TextColor Cyan
-Write-WinUtilBannerLine -Text "Channels DVR Installer" -TextColor White
+Write-WinUtilBannerLine -Text "CDVR WinUtil $($sync.version)" -TextColor Cyan
+Write-WinUtilBannerLine -Text "WinUtil-for-Channels" -TextColor White
 Write-WinUtilBannerLine -Text "fork of ChrisTitusTech/winutil" -TextColor DarkGray
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor DarkGray
 Write-Host ""
@@ -15593,6 +15602,20 @@ $sync["Form"].Add_Loaded({
 
 $NavLogoPanel = $sync["Form"].FindName("NavLogoPanel")
 $NavLogoPanel.Children.Add((Invoke-WinUtilAssets -Type "logo" -Size 25)) | Out-Null
+
+# Same version shown in the console banner at startup ($sync.version, baked in at compile time
+# by Compile.ps1) - kept next to the logo so it's visible at a glance instead of only reachable
+# via the title bar or the Settings > About dialog.
+$versionLabel = New-Object Windows.Controls.TextBlock
+$versionLabel.Text = $sync.version
+$versionLabel.Margin = New-Object Windows.Thickness(6, 0, 0, 0)
+$versionLabel.VerticalAlignment = [Windows.VerticalAlignment]::Center
+$versionLabel.Background = [Windows.Media.Brushes]::Transparent
+$versionLabel.SetResourceReference([Windows.Controls.TextBlock]::FontSizeProperty, "AppEntrySubtitleFontSize")
+$versionLabel.SetResourceReference([Windows.Controls.TextBlock]::ForegroundProperty, "LinkForegroundColor")
+$versionLabel.ToolTip = "CDVR WinUtil version"
+$NavLogoPanel.Children.Add($versionLabel) | Out-Null
+
 Initialize-WinUtilTaskbarOverlayAssets -IncludeLogo $true -IncludeStatusAssets $false
 
 Set-WinUtilTaskbaritem -overlay "logo"

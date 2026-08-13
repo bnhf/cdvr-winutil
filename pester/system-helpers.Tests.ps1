@@ -168,6 +168,7 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
                     WPFInstallchannelsdvr = [pscustomobject]@{ installType = "direct"; webui = "http://localhost:8089" }
                     WPFInstallrustdvr = [pscustomobject]@{ installType = "github"; webui = $null }
                     WPFInstallolivetin = [pscustomobject]@{ installType = "wslCommand"; distro = "Debian"; installCheckCommand = "docker inspect olivetin-ezstart" }
+                    WPFInstallstreamlinkmanager = [pscustomobject]@{ installType = "streamLinkManager" }
                 }
             }
         })
@@ -224,6 +225,24 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
 
         $result | Should -Not -Contain "WPFInstallolivetin"
+    }
+
+    It "detects a streamLinkManager package via its fixed install path" {
+        # Regression guard: Streaming Library Manager installed to a real, fixed location but
+        # "Show Installed Apps" never checked for it - this installType had no case at all.
+        Mock Test-Path { $true } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Contain "WPFInstallstreamlinkmanager"
+    }
+
+    It "does not report streamLinkManager as installed when its exe is not present" {
+        Mock Test-Path { $false } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Not -Contain "WPFInstallstreamlinkmanager"
     }
 }
 

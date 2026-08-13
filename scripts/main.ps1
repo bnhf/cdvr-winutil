@@ -59,8 +59,8 @@ function Write-WinUtilBannerLine {
 }
 
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor DarkGray
-Write-WinUtilBannerLine -Text "CDVR WinUtil v$($sync.version)" -TextColor Cyan
-Write-WinUtilBannerLine -Text "Channels DVR Installer" -TextColor White
+Write-WinUtilBannerLine -Text "CDVR WinUtil $($sync.version)" -TextColor Cyan
+Write-WinUtilBannerLine -Text "WinUtil-for-Channels" -TextColor White
 Write-WinUtilBannerLine -Text "fork of ChrisTitusTech/winutil" -TextColor DarkGray
 Write-Host ($channelsLogoLeftMargin + "+" + ("-" * $channelsLogoInnerWidth) + "+") -ForegroundColor DarkGray
 Write-Host ""
@@ -421,6 +421,20 @@ $sync["Form"].Add_Loaded({
 
 $NavLogoPanel = $sync["Form"].FindName("NavLogoPanel")
 $NavLogoPanel.Children.Add((Invoke-WinUtilAssets -Type "logo" -Size 25)) | Out-Null
+
+# Same version shown in the console banner at startup ($sync.version, baked in at compile time
+# by Compile.ps1) - kept next to the logo so it's visible at a glance instead of only reachable
+# via the title bar or the Settings > About dialog.
+$versionLabel = New-Object Windows.Controls.TextBlock
+$versionLabel.Text = $sync.version
+$versionLabel.Margin = New-Object Windows.Thickness(6, 0, 0, 0)
+$versionLabel.VerticalAlignment = [Windows.VerticalAlignment]::Center
+$versionLabel.Background = [Windows.Media.Brushes]::Transparent
+$versionLabel.SetResourceReference([Windows.Controls.TextBlock]::FontSizeProperty, "AppEntrySubtitleFontSize")
+$versionLabel.SetResourceReference([Windows.Controls.TextBlock]::ForegroundProperty, "LinkForegroundColor")
+$versionLabel.ToolTip = "CDVR WinUtil version"
+$NavLogoPanel.Children.Add($versionLabel) | Out-Null
+
 Initialize-WinUtilTaskbarOverlayAssets -IncludeLogo $true -IncludeStatusAssets $false
 
 Set-WinUtilTaskbaritem -overlay "logo"
