@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1240
+    Version        : v2026.08.13.1327
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1240"
+$sync.version = "v2026.08.13.1327"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -1843,6 +1843,12 @@ Function Install-WinUtilProgramDirect {
         [scriptblock]$ProgressCallback
     )
 
+    # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
+    # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
+    # Windows PowerShell 5.1). Function-local, so it reverts automatically for the caller once
+    # this function returns.
+    $ProgressPreference = 'SilentlyContinue'
+
     foreach ($package in $Packages) {
         $name = $package.content
         $url = $package.url
@@ -1937,6 +1943,12 @@ Function Install-WinUtilProgramGithub {
     )
 
     $headers = @{ "User-Agent" = "cdvr-winutil" }
+
+    # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
+    # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
+    # Windows PowerShell 5.1) - these installer assets are often 50-150MB. Function-local, so it
+    # reverts automatically for the caller once this function returns.
+    $ProgressPreference = 'SilentlyContinue'
 
     foreach ($package in $Packages) {
         $name = $package.content
@@ -2053,6 +2065,10 @@ Function Install-WinUtilProgramNpm {
 
         [scriptblock]$ProgressCallback
     )
+
+    # Node.js (npm's own prerequisite) may have installed via winget/choco earlier in this same
+    # run - refresh PATH so this process actually sees it instead of reporting a false negative.
+    Update-WinUtilSessionPath
 
     foreach ($package in $Packages) {
         $name = $package.content
@@ -2211,6 +2227,12 @@ Function Install-WinUtilStreamLinkManager {
     # Same link slm.bat itself downloads from for a normal (non-prerelease) install.
     $downloadUrl = "https://www.dropbox.com/scl/fi/apw33xi80jjivyjp9rxb4/slm_windows.zip?rlkey=1m5zj7qz9ittguispsi00nyar&dl=1"
     $taskName = "Streaming Library Manager"
+
+    # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
+    # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
+    # Windows PowerShell 5.1). Function-local, so it reverts automatically for the caller once
+    # this function returns.
+    $ProgressPreference = 'SilentlyContinue'
 
     foreach ($package in $Packages) {
         $name = $package.content
@@ -7041,6 +7063,10 @@ function Test-WinUtilNpmPackageInstalled {
         [string]$NpmPackage
     )
 
+    # Same staleness risk as Install-WinUtilProgramNpm - "Show Installed Apps" can run in the
+    # same session right after Node.js installed, before this process would otherwise see it.
+    Update-WinUtilSessionPath
+
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         return $false
     }
@@ -7503,6 +7529,12 @@ Function Uninstall-WinUtilProgramDirect {
         [scriptblock]$ProgressCallback
     )
 
+    # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
+    # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
+    # Windows PowerShell 5.1). Function-local, so it reverts automatically for the caller once
+    # this function returns.
+    $ProgressPreference = 'SilentlyContinue'
+
     foreach ($package in $Packages) {
         $name = $package.content
 
@@ -7761,6 +7793,26 @@ function Update-WinUtilSelections ($flatJson) {
 
         $sync.$listName.Add($cbkey)
     }
+}
+
+function Update-WinUtilSessionPath {
+    <#
+    .SYNOPSIS
+        Refreshes $env:Path for the current process from the registry (Machine + User).
+
+    .DESCRIPTION
+        $env:Path is only populated once, at process start - it does not pick up changes an
+        installer makes to the persisted PATH afterward. Confirmed live: installing Node.js via
+        winget, then immediately installing an npm-type package (e.g. Prismcast) in the same
+        install run, failed with "npm is not on PATH" even though the winget install had just
+        completed successfully - npm.exe was on disk and the registry PATH was updated, but this
+        already-running process never re-read it. Chocolatey's own install script sidesteps this
+        for itself by appending directly to $env:Path during install, but winget does not, and a
+        general-purpose fix here covers any installer regardless of how it updates PATH.
+    #>
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = @($machinePath, $userPath) -join ";"
 }
 
 function Write-WinUtilLog {

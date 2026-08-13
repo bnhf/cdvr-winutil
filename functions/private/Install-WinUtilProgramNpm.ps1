@@ -18,6 +18,10 @@ Function Install-WinUtilProgramNpm {
         [scriptblock]$ProgressCallback
     )
 
+    # Node.js (npm's own prerequisite) may have installed via winget/choco earlier in this same
+    # run - refresh PATH so this process actually sees it instead of reporting a false negative.
+    Update-WinUtilSessionPath
+
     foreach ($package in $Packages) {
         $name = $package.content
         $npmPackage = $package.npmPackage

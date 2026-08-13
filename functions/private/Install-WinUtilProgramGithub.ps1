@@ -31,6 +31,12 @@ Function Install-WinUtilProgramGithub {
 
     $headers = @{ "User-Agent" = "cdvr-winutil" }
 
+    # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
+    # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
+    # Windows PowerShell 5.1) - these installer assets are often 50-150MB. Function-local, so it
+    # reverts automatically for the caller once this function returns.
+    $ProgressPreference = 'SilentlyContinue'
+
     foreach ($package in $Packages) {
         $name = $package.content
         $repo = $package.repo

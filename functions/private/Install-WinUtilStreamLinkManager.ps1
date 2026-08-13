@@ -37,6 +37,12 @@ Function Install-WinUtilStreamLinkManager {
     $downloadUrl = "https://www.dropbox.com/scl/fi/apw33xi80jjivyjp9rxb4/slm_windows.zip?rlkey=1m5zj7qz9ittguispsi00nyar&dl=1"
     $taskName = "Streaming Library Manager"
 
+    # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
+    # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
+    # Windows PowerShell 5.1). Function-local, so it reverts automatically for the caller once
+    # this function returns.
+    $ProgressPreference = 'SilentlyContinue'
+
     foreach ($package in $Packages) {
         $name = $package.content
         $installDir = Join-Path $env:LocalAppData "StreamLinkManager"

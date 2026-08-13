@@ -14,6 +14,10 @@ function Test-WinUtilNpmPackageInstalled {
         [string]$NpmPackage
     )
 
+    # Same staleness risk as Install-WinUtilProgramNpm - "Show Installed Apps" can run in the
+    # same session right after Node.js installed, before this process would otherwise see it.
+    Update-WinUtilSessionPath
+
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         return $false
     }
