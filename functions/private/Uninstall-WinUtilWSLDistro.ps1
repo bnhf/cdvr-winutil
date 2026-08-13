@@ -20,10 +20,15 @@ Function Uninstall-WinUtilWSLDistro {
         than plain strings, so each is converted to its plain .Exception.Message before
         Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
         case (a genuinely successful install logging what looked like a crash).
+
+        ProgressCallback works the same way as Install-WinUtilWSLCommand's - see that function's
+        docstring for why it only needs to cover the gap before -OnWaiting's own updates start.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -41,6 +46,7 @@ Function Uninstall-WinUtilWSLDistro {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
+        if ($ProgressCallback) { try { & $ProgressCallback "Unregistering WSL distro $distro..." } catch {} }
 
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)

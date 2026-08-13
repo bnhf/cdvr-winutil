@@ -3,13 +3,19 @@ Function Install-WinUtilProgramNpm {
     .SYNOPSIS
         Installs or uninstalls a global npm package. Requires Node.js/npm to already be on
         PATH - packages using this installType should declare "nodejs" in their "requires".
+
+    .DESCRIPTION
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
         [string]$Action = "Install",
 
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -28,6 +34,7 @@ Function Install-WinUtilProgramNpm {
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
+        if ($ProgressCallback) { try { & $ProgressCallback "$Action $name via npm..." } catch {} }
         $process = Start-Process -FilePath "npm" -ArgumentList @($npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
 

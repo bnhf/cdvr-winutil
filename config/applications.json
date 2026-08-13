@@ -119,7 +119,7 @@
         "content": "VLC",
         "description": "VLC media player is a free, open-source, cross-platform multimedia player that plays most local video/audio files and discs, by VideoLAN.",
         "link": "https://www.videolan.org/vlc/",
-        "icon": "https://upload.wikimedia.org/wikipedia/commons/3/38/VLC_icon.png",
+        "icon": "https://images.videolan.org/images/favicon.ico",
         "handle": "VideoLAN",
         "winget": "VideoLAN.VLC",
         "foss": true

@@ -135,6 +135,16 @@ Describe "Install-WinUtilProgramDirect" {
             $FilePath -like "*Channels DVR.exe"
         }
     }
+
+    It "reports download and install milestones via ProgressCallback" {
+        $messages = [System.Collections.Generic.List[string]]::new()
+
+        Install-WinUtilProgramDirect -Packages @(New-WinUtilDirectPackage) -ProgressCallback {
+            param($message) $messages.Add($message)
+        }
+
+        $messages | Should -Be @("Downloading Channels DVR...", "Installing Channels DVR...")
+    }
 }
 
 Describe "Uninstall-WinUtilProgramDirect" {
@@ -165,6 +175,16 @@ Describe "Uninstall-WinUtilProgramDirect" {
         Should -Invoke -CommandName Start-Process -Times 1 -Exactly
         Should -Invoke -CommandName Set-WinUtilProcessForeground -Times 1 -Exactly
     }
+
+    It "reports the uninstall milestone via ProgressCallback" {
+        $messages = [System.Collections.Generic.List[string]]::new()
+
+        Uninstall-WinUtilProgramDirect -Packages @(New-WinUtilDirectPackage -UninstallCommand "Write-Output 'noop'") -ProgressCallback {
+            param($message) $messages.Add($message)
+        }
+
+        $messages | Should -Be @("Uninstalling Channels DVR...")
+    }
 }
 
 Describe "Install-WinUtilProgramGithub" {
@@ -189,5 +209,16 @@ Describe "Install-WinUtilProgramGithub" {
 
         Should -Invoke -CommandName Start-WinUtilProcessAsStandardUserNoWait -Times 1 -Exactly
         Should -Invoke -CommandName Start-Process -Times 0 -Exactly
+    }
+
+    It "reports release-check, download, and install milestones via ProgressCallback" {
+        $package = [pscustomobject]@{ content = "Clicker"; repo = "mackid1993/Clicker"; assetPattern = "Clicker-Setup-*.exe" }
+        $messages = [System.Collections.Generic.List[string]]::new()
+
+        Install-WinUtilProgramGithub -Packages @($package) -ProgressCallback {
+            param($message) $messages.Add($message)
+        }
+
+        $messages | Should -Be @("Checking latest release for Clicker...", "Downloading Clicker...", "Installing Clicker...")
     }
 }

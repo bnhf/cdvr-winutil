@@ -37,6 +37,11 @@ function Invoke-WPFUnInstall {
 
     if($confirm -eq "No") {return}
 
+    # Shown right after confirmation, not just once the background runspace starts below - see
+    # Invoke-WPFInstall.ps1's matching comment for why (the runspace start + bucket resolution
+    # below can itself take a moment with no visible feedback otherwise).
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Preparing uninstall..." -Percent 0
+
     $ManagerPreference = $sync.preferences.packagemanager
     Write-WinUtilLog -Component "Uninstall" -Message "Uninstall requested for $(@($PackagesToUninstall).Count) selected package(s) using preference: $ManagerPreference"
     $packageSummary = Get-WinUtilPackageLogSummary -Packages $PackagesToUninstall -Preference $ManagerPreference
@@ -92,6 +97,13 @@ function Invoke-WPFUnInstall {
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
+        # See Invoke-WPFInstall.ps1's matching comment for why this exists and what it does.
+        $progressCallback = if ($hasUI) {
+            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
+        } else {
+            $null
+        }
+
         try {
             $sync.ProcessRunning = $true
             if ($hasUI) {
@@ -137,7 +149,7 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco
+                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco -ProgressCallback $progressCallback
                 foreach ($r in $uninstallResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
@@ -150,65 +162,37 @@ function Invoke-WPFUnInstall {
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
-            if ($packagesNpm.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling npm packages ($position/$totalPackages)" -Percent $startPercent
-                }
+            foreach ($uninstallBucket in @(
+                @{ Packages = $packagesNpm; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesDirect; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
+            )) {
+                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
+                # missing bucket is correctly treated as empty here, instead of falling through
+                # to the uninstaller call below with $null and crashing on its Mandatory
+                # [object[]] parameter ("Cannot bind argument ... because it is null").
+                $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
 
-                Install-WinUtilProgramNpm -Action Uninstall -Packages $packagesNpm
-                $completedPackages += @($packagesNpm).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled npm packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
-                }
-            }
-            if ($packagesDirect.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling direct-install packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                # One package at a time - see Invoke-WPFInstall.ps1's matching comment for why
+                # (per-package percent movement plus each uninstaller's own -ProgressCallback
+                # milestones).
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                Uninstall-WinUtilProgramDirect -Packages $packagesDirect
-                $completedPackages += @($packagesDirect).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled direct-install packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
-                }
-            }
-            if ($packagesWslCommand.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL command packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
 
-                Install-WinUtilWSLCommand -Action Uninstall -Packages $packagesWslCommand
-                $completedPackages += @($packagesWslCommand).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled WSL command packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
-                }
-            }
-
-            if ($packagesStreamLinkManager.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Streaming Library Manager ($position/$totalPackages)" -Percent $startPercent
-                }
-
-                Uninstall-WinUtilStreamLinkManager -Packages $packagesStreamLinkManager
-                $completedPackages += @($packagesStreamLinkManager).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Streaming Library Manager ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 
@@ -216,29 +200,27 @@ function Invoke-WPFUnInstall {
             # distro(s) itself, so running the distro bucket first just means that work is
             # already done (and skipped as a no-op) by the time the feature bucket reaches it.
             foreach ($uninstallBucket in @(
-                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Uninstaller = { param($pkgs) Uninstall-WinUtilWSLDistro -Packages $pkgs } },
-                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Uninstaller = { param($pkgs) Uninstall-WinUtilFeatureWSL -Packages $pkgs } }
+                @{ Packages = $packagesWslDistro; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslFeature; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } }
             )) {
-                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
-                # missing bucket is correctly treated as empty here, instead of falling through
-                # to the uninstaller call below with $null and crashing on its Mandatory
-                # [object[]] parameter ("Cannot bind argument ... because it is null").
                 $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
-                if ($bucketPackages.Count -eq 0) { continue }
 
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $($uninstallBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                & $uninstallBucket.Uninstaller $bucketPackages
+                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
 
-                $completedPackages += $bucketPackages.Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $($uninstallBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 

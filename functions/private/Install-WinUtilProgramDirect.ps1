@@ -21,10 +21,20 @@ Function Install-WinUtilProgramDirect {
         running, launching it a second time. Falls back to running elevated (with a logged
         warning) if de-elevation itself fails for any reason, the same best-effort philosophy as
         the winget install path.
+
+        ProgressCallback, when supplied, is invoked with a short status string at each milestone
+        below (downloading, installing, done) - this function has no other way to report
+        progress, since (unlike the WSL-invoking installers) there's no periodic -OnWaiting
+        callback for a plain Invoke-WebRequest/Start-Process call. Invoke-WPFInstall.ps1 wires
+        this to the shared window-level progress indicator so its label changes mid-install
+        instead of sitting frozen on "Installing X" for however long the download/install
+        actually takes.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -42,6 +52,7 @@ Function Install-WinUtilProgramDirect {
         $dest = Join-Path $env:TEMP "$name$ext"
 
         Write-WinUtilLog -Component "Package" -Message "Downloading $name from $url"
+        if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
         try {
             Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 60
         } catch {
@@ -50,6 +61,7 @@ Function Install-WinUtilProgramDirect {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             if ($ext -eq ".msi") {
                 Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`" $installArgs") | Out-Null

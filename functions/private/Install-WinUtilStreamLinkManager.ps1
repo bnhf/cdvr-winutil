@@ -19,10 +19,18 @@ Function Install-WinUtilStreamLinkManager {
         No uninstall is documented upstream either. Because this owns the entire install
         location, Uninstall-WinUtilStreamLinkManager can safely remove it outright: stop the
         process, unregister the scheduled task, delete the install directory.
+
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists. Particularly relevant here: confirmed live, this
+        specific install (a single Dropbox download + extract, no per-step feedback beyond log
+        lines) was reported as looking frozen - the progress bar showed up blank and never moved
+        until the whole thing finished.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     # Same link slm.bat itself downloads from for a normal (non-prerelease) install.
@@ -36,6 +44,7 @@ Function Install-WinUtilStreamLinkManager {
         $extractPath = Join-Path $env:TEMP "slm_windows_extract_$([guid]::NewGuid().ToString('N'))"
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name to $installDir"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             # Stop any running instance first so its files aren't locked during overwrite -
             # slm.bat does the same before it re-extracts over an existing install.
@@ -44,9 +53,11 @@ Function Install-WinUtilStreamLinkManager {
             New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Downloading $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
             Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
 
             Write-WinUtilLog -Component "Package" -Message "Extracting $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Extracting $name..." } catch {} }
             Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
             if (-not (Test-Path $installDir)) {
@@ -66,6 +77,7 @@ Function Install-WinUtilStreamLinkManager {
             & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl highest /f | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Starting $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
             Start-Process -WindowStyle Hidden -FilePath $exePath
 
             Write-WinUtilLog -Component "Package" -Message "$name installed and started - web interface at $($package.webui)"

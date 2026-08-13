@@ -24,6 +24,13 @@ function Invoke-WPFInstall {
         return
     }
 
+    # Shown before anything else runs, not just once the background runspace starts below -
+    # confirmed live: prerequisite/prompt resolution just below can itself take a moment (modal
+    # dialogs, checking whether something's already installed), during which nothing was visible
+    # at all before this - a click that appeared to do nothing until the bar suddenly showed up
+    # already blank.
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Preparing install..." -Percent 0
+
     # Prerequisite checks and value prompts show modal dialogs, so they must run here on the
     # UI thread - before the selection is handed off to the background install runspace.
     $PackagesToInstall = Resolve-WinUtilPrerequisites -PackagesToInstall $PackagesToInstall
@@ -88,6 +95,19 @@ function Invoke-WPFInstall {
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
+        # Passed to every bucket installer below so their existing milestone log lines (download
+        # started, extracting, installing, ...) also update the shared progress label - without
+        # this, a single-package bucket showed one static label for however long the whole
+        # install took (confirmed live: Streaming Library Manager looked frozen at 0% the entire
+        # time). Only updates the Label, not Percent - Percent is still driven by whole-package
+        # completion below, this just proves the app is actually still doing something between
+        # those points. $null when there's no UI to update (e.g. -Preset/-Config unattended runs).
+        $progressCallback = if ($hasUI) {
+            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
+        } else {
+            $null
+        }
+
         try {
             $sync.ProcessRunning = $true
             if ($hasUI) {
@@ -104,29 +124,35 @@ function Invoke-WPFInstall {
             # unconditionally first and the WSL feature/distro buckets only ran afterward as
             # part of the general bucket loop below.
             foreach ($installBucket in @(
-                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
-                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } }
+                @{ Packages = $packagesWslFeature; Installer = { param($pkgs, $cb) Install-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslDistro; Installer = { param($pkgs, $cb) Install-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
                 # missing bucket is correctly treated as empty here, instead of falling through
                 # to the installer call below with $null and crashing on its Mandatory
                 # [object[]] parameter ("Cannot bind argument ... because it is null").
                 $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
-                if ($bucketPackages.Count -eq 0) { continue }
 
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                # One package at a time, not the whole bucket in a single call - each installer
+                # (via -ProgressCallback above) already reports its own milestones, but a bucket
+                # with more than one package still needs its OWN per-package percent movement,
+                # the same granularity the winget loop below already has.
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                & $installBucket.Installer $bucketPackages
+                    & $installBucket.Installer @($pkg) $progressCallback
 
-                $completedPackages += $bucketPackages.Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 
@@ -170,7 +196,7 @@ function Invoke-WPFInstall {
                 }
 
                 Install-WinUtilChoco
-                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco -ProgressCallback $progressCallback
                 foreach ($r in $installResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
@@ -194,29 +220,33 @@ function Invoke-WPFInstall {
             }
 
             foreach ($installBucket in @(
-                @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
-                @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
-                @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },
-                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } },
-                @{ Packages = $packagesStreamLinkManager; Label = "Streaming Library Manager"; Installer = { param($pkgs) Install-WinUtilStreamLinkManager -Packages $pkgs } }
+                @{ Packages = $packagesDirect; Installer = { param($pkgs, $cb) Install-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; Installer = { param($pkgs, $cb) Install-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesNpm; Installer = { param($pkgs, $cb) Install-WinUtilProgramNpm -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; Installer = { param($pkgs, $cb) Install-WinUtilWSLCommand -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; Installer = { param($pkgs, $cb) Install-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - see the WSL bucket loop above for why this matters.
                 $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
-                if ($bucketPackages.Count -eq 0) { continue }
 
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                # One package at a time - see the WSL bucket loop above for why (per-package
+                # percent movement plus each installer's own -ProgressCallback milestones).
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                & $installBucket.Installer $bucketPackages
+                    & $installBucket.Installer @($pkg) $progressCallback
 
-                $completedPackages += $bucketPackages.Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 

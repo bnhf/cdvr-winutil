@@ -6,11 +6,14 @@ Function Install-WinUtilProgramGithub {
 
     .DESCRIPTION
         De-elevated the same way, and for the same reason, as Install-WinUtilProgramDirect -
-        see that function's own docstring.
+        see that function's own docstring. ProgressCallback works the same way too - see that
+        function's docstring for why it exists.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     $headers = @{ "User-Agent" = "cdvr-winutil" }
@@ -26,6 +29,7 @@ Function Install-WinUtilProgramGithub {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Querying latest release for $repo"
+        if ($ProgressCallback) { try { & $ProgressCallback "Checking latest release for $name..." } catch {} }
         $release = $null
         try {
             $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers -TimeoutSec 30
@@ -54,6 +58,7 @@ Function Install-WinUtilProgramGithub {
 
         $dest = Join-Path $env:TEMP $asset.name
         Write-WinUtilLog -Component "Package" -Message "Downloading $($asset.name) for $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
         try {
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest -UseBasicParsing -TimeoutSec 120
         } catch {
@@ -62,6 +67,7 @@ Function Install-WinUtilProgramGithub {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             if ($dest -like "*.msi") {
                 Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`"") | Out-Null

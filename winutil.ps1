@@ -1574,15 +1574,21 @@ Function Install-WinUtilFeatureWSL {
         than plain strings, so each is converted to its plain .Exception.Message before
         Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
         case (a genuinely successful install logging what looked like a crash).
+
+        ProgressCallback works the same way as Install-WinUtilWSLCommand's - see that function's
+        docstring for why it only needs to cover the gap before -OnWaiting's own updates start.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
+        if ($ProgressCallback) { try { & $ProgressCallback "Enabling WSL2..." } catch {} }
 
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
@@ -1638,6 +1644,12 @@ function Install-WinUtilProgramChoco {
         attempt succeeded. Choco runs one batched command per install/upgrade/uninstall group
         rather than one call per package, so every program in the same batch shares that
         batch's exit code/outcome - the same granularity choco itself gives us.
+
+    .DESCRIPTION
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists. Only fires once per batch (install/upgrade/
+        uninstall), matching the granularity described above - there's no per-package signal to
+        report mid-batch since choco itself runs the whole group as one process.
     #>
     param (
         [Parameter(Mandatory=$true)]
@@ -1645,7 +1657,9 @@ function Install-WinUtilProgramChoco {
         [string]$Action,
 
         [Parameter(Mandatory=$true)]
-        [string[]]$Programs
+        [string[]]$Programs,
+
+        [scriptblock]$ProgressCallback
     )
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -1653,6 +1667,7 @@ function Install-WinUtilProgramChoco {
     if ($Action -eq 'Uninstall') {
         $arguments = "uninstall $Programs -y"
         Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s): $($Programs -join ', ')"
+        if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling via choco: $($Programs -join ', ')..." } catch {} }
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $success = $process.ExitCode -eq 0
         if ($success) {
@@ -1690,6 +1705,7 @@ function Install-WinUtilProgramChoco {
     if ($toInstall.Count -gt 0) {
         $arguments = "install $toInstall -y"
         Write-WinUtilLog -Component "Package" -Message "Install choco package(s): $($toInstall -join ', ')"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing via choco: $($toInstall -join ', ')..." } catch {} }
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $success = $process.ExitCode -eq 0
         if ($success) {
@@ -1705,6 +1721,7 @@ function Install-WinUtilProgramChoco {
     if ($toUpgrade.Count -gt 0) {
         $arguments = "upgrade $toUpgrade -y"
         Write-WinUtilLog -Component "Package" -Message "Upgrade already-installed choco package(s): $($toUpgrade -join ', ')"
+        if ($ProgressCallback) { try { & $ProgressCallback "Upgrading via choco: $($toUpgrade -join ', ')..." } catch {} }
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $success = $process.ExitCode -eq 0
         if ($success) {
@@ -1743,10 +1760,20 @@ Function Install-WinUtilProgramDirect {
         running, launching it a second time. Falls back to running elevated (with a logged
         warning) if de-elevation itself fails for any reason, the same best-effort philosophy as
         the winget install path.
+
+        ProgressCallback, when supplied, is invoked with a short status string at each milestone
+        below (downloading, installing, done) - this function has no other way to report
+        progress, since (unlike the WSL-invoking installers) there's no periodic -OnWaiting
+        callback for a plain Invoke-WebRequest/Start-Process call. Invoke-WPFInstall.ps1 wires
+        this to the shared window-level progress indicator so its label changes mid-install
+        instead of sitting frozen on "Installing X" for however long the download/install
+        actually takes.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -1764,6 +1791,7 @@ Function Install-WinUtilProgramDirect {
         $dest = Join-Path $env:TEMP "$name$ext"
 
         Write-WinUtilLog -Component "Package" -Message "Downloading $name from $url"
+        if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
         try {
             Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 60
         } catch {
@@ -1772,6 +1800,7 @@ Function Install-WinUtilProgramDirect {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             if ($ext -eq ".msi") {
                 Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`" $installArgs") | Out-Null
@@ -1816,11 +1845,14 @@ Function Install-WinUtilProgramGithub {
 
     .DESCRIPTION
         De-elevated the same way, and for the same reason, as Install-WinUtilProgramDirect -
-        see that function's own docstring.
+        see that function's own docstring. ProgressCallback works the same way too - see that
+        function's docstring for why it exists.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     $headers = @{ "User-Agent" = "cdvr-winutil" }
@@ -1836,6 +1868,7 @@ Function Install-WinUtilProgramGithub {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Querying latest release for $repo"
+        if ($ProgressCallback) { try { & $ProgressCallback "Checking latest release for $name..." } catch {} }
         $release = $null
         try {
             $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers -TimeoutSec 30
@@ -1864,6 +1897,7 @@ Function Install-WinUtilProgramGithub {
 
         $dest = Join-Path $env:TEMP $asset.name
         Write-WinUtilLog -Component "Package" -Message "Downloading $($asset.name) for $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
         try {
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest -UseBasicParsing -TimeoutSec 120
         } catch {
@@ -1872,6 +1906,7 @@ Function Install-WinUtilProgramGithub {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             if ($dest -like "*.msi") {
                 Start-WinUtilProcessAsStandardUser -FilePath "msiexec.exe" -ArgumentList @("/i `"$dest`"") | Out-Null
@@ -1903,13 +1938,19 @@ Function Install-WinUtilProgramNpm {
     .SYNOPSIS
         Installs or uninstalls a global npm package. Requires Node.js/npm to already be on
         PATH - packages using this installType should declare "nodejs" in their "requires".
+
+    .DESCRIPTION
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
         [string]$Action = "Install",
 
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -1928,6 +1969,7 @@ Function Install-WinUtilProgramNpm {
 
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
+        if ($ProgressCallback) { try { & $ProgressCallback "$Action $name via npm..." } catch {} }
         $process = Start-Process -FilePath "npm" -ArgumentList @($npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
 
@@ -2051,10 +2093,18 @@ Function Install-WinUtilStreamLinkManager {
         No uninstall is documented upstream either. Because this owns the entire install
         location, Uninstall-WinUtilStreamLinkManager can safely remove it outright: stop the
         process, unregister the scheduled task, delete the install directory.
+
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists. Particularly relevant here: confirmed live, this
+        specific install (a single Dropbox download + extract, no per-step feedback beyond log
+        lines) was reported as looking frozen - the progress bar showed up blank and never moved
+        until the whole thing finished.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     # Same link slm.bat itself downloads from for a normal (non-prerelease) install.
@@ -2068,6 +2118,7 @@ Function Install-WinUtilStreamLinkManager {
         $extractPath = Join-Path $env:TEMP "slm_windows_extract_$([guid]::NewGuid().ToString('N'))"
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name to $installDir"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
         try {
             # Stop any running instance first so its files aren't locked during overwrite -
             # slm.bat does the same before it re-extracts over an existing install.
@@ -2076,9 +2127,11 @@ Function Install-WinUtilStreamLinkManager {
             New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Downloading $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
             Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
 
             Write-WinUtilLog -Component "Package" -Message "Extracting $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Extracting $name..." } catch {} }
             Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
             if (-not (Test-Path $installDir)) {
@@ -2098,6 +2151,7 @@ Function Install-WinUtilStreamLinkManager {
             & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl highest /f | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Starting $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
             Start-Process -WindowStyle Hidden -FilePath $exePath
 
             Write-WinUtilLog -Component "Package" -Message "$name installed and started - web interface at $($package.webui)"
@@ -2195,13 +2249,20 @@ Function Install-WinUtilWSLCommand {
         that function, there's no independent way to verify an arbitrary command's success after
         a timeout, so a timeout here is logged as a real, if inconclusive, warning rather than
         silently assumed fine.
+
+        ProgressCallback, when supplied, is invoked once per package right before it starts
+        running - unlike the direct-download installers, this already reports live progress
+        during a long run via -OnWaiting above, so the callback here only needs to cover the gap
+        before that first fires (up to OnWaitingIntervalSeconds after starting).
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
         [string]$Action = "Install",
 
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     $lanIp = Get-WinUtilLanIPAddress
@@ -2243,6 +2304,7 @@ Function Install-WinUtilWSLCommand {
         $wslTempPath = "\\wsl.localhost\$distro\tmp\$scriptName"
 
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
+        if ($ProgressCallback) { try { & $ProgressCallback "Running $name $($Action.ToLower()) inside WSL..." } catch {} }
         try {
             Set-WinUtilNoBomFileContent -Path $wslTempPath -Value $command
 
@@ -2317,10 +2379,15 @@ Function Install-WinUtilWSLDistro {
         than plain strings, so each is converted to its plain .Exception.Message before
         Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
         case (a genuinely successful install logging what looked like a crash).
+
+        ProgressCallback works the same way as Install-WinUtilWSLCommand's - see that function's
+        docstring for why it only needs to cover the gap before -OnWaiting's own updates start.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -2333,6 +2400,7 @@ Function Install-WinUtilWSLDistro {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Installing WSL distro $distro ($name)"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing WSL distro $distro..." } catch {} }
 
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
@@ -7058,10 +7126,15 @@ Function Uninstall-WinUtilFeatureWSL {
         than plain strings, so each is converted to its plain .Exception.Message before
         Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
         case (a genuinely successful install logging what looked like a crash).
+
+        ProgressCallback works the same way as Install-WinUtilWSLCommand's - see that function's
+        docstring for why it only needs to cover the gap before -OnWaiting's own updates start.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     $ownedDistros = @($sync.configs.applicationsHashtable.Values | Where-Object { $_.installType -eq "wslDistro" })
@@ -7076,7 +7149,7 @@ Function Uninstall-WinUtilFeatureWSL {
         }
 
         if ($confirmed) {
-            Uninstall-WinUtilWSLDistro -Packages $registeredOwnedDistros
+            Uninstall-WinUtilWSLDistro -Packages $registeredOwnedDistros -ProgressCallback $ProgressCallback
         } else {
             Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Skipping deletion of $distroNames - declined. Left registered (will become orphaned, not deleted, once the WSL2 runtime below is uninstalled)."
         }
@@ -7085,6 +7158,7 @@ Function Uninstall-WinUtilFeatureWSL {
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Uninstalling WSL2 ($name)"
+        if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling WSL2..." } catch {} }
 
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
@@ -7133,10 +7207,15 @@ Function Uninstall-WinUtilProgramDirect {
         Start-WinUtilProcessAsStandardUserNoWait rather than the waiting variant since this
         relaunch is the same "never exits, don't wait for it" shape as that function's no-args
         interactive branch (the installer stays open for the user to click Uninstall in it).
+
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -7144,6 +7223,7 @@ Function Uninstall-WinUtilProgramDirect {
 
         if (-not [string]::IsNullOrWhiteSpace($package.uninstallCommand)) {
             Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
             try {
                 & ([scriptblock]::Create($package.uninstallCommand))
                 Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
@@ -7160,6 +7240,7 @@ Function Uninstall-WinUtilProgramDirect {
             $dest = Join-Path $env:TEMP "$name-uninstall$ext"
 
             Write-WinUtilLog -Component "Package" -Message "Downloading $name installer (for uninstall) from $url"
+            if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name uninstaller..." } catch {} }
             try {
                 Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 60
             } catch {
@@ -7194,10 +7275,15 @@ Function Uninstall-WinUtilStreamLinkManager {
         owns the entire install location (a fixed folder under LocalAppData, not something the
         user chose or put other data into), this can safely remove it outright: stop the
         process, unregister the logon scheduled task, delete the install directory.
+
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     $taskName = "Streaming Library Manager"
@@ -7207,6 +7293,7 @@ Function Uninstall-WinUtilStreamLinkManager {
         $installDir = Join-Path $env:LocalAppData "StreamLinkManager"
 
         Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
+        if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
         try {
             Get-Process -Name "slm" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             & schtasks /delete /tn $taskName /f 2>$null | Out-Null
@@ -7244,10 +7331,15 @@ Function Uninstall-WinUtilWSLDistro {
         than plain strings, so each is converted to its plain .Exception.Message before
         Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
         case (a genuinely successful install logging what looked like a crash).
+
+        ProgressCallback works the same way as Install-WinUtilWSLCommand's - see that function's
+        docstring for why it only needs to cover the gap before -OnWaiting's own updates start.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -7265,6 +7357,7 @@ Function Uninstall-WinUtilWSLDistro {
         }
 
         Write-WinUtilLog -Component "Package" -Message "Unregistering WSL distro $distro ($name) - this deletes its filesystem and data."
+        if ($ProgressCallback) { try { & $ProgressCallback "Unregistering WSL distro $distro..." } catch {} }
 
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 120 -DefaultValue $null -ArgumentList @($distro) -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)
@@ -8394,6 +8487,13 @@ function Invoke-WPFInstall {
         return
     }
 
+    # Shown before anything else runs, not just once the background runspace starts below -
+    # confirmed live: prerequisite/prompt resolution just below can itself take a moment (modal
+    # dialogs, checking whether something's already installed), during which nothing was visible
+    # at all before this - a click that appeared to do nothing until the bar suddenly showed up
+    # already blank.
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Preparing install..." -Percent 0
+
     # Prerequisite checks and value prompts show modal dialogs, so they must run here on the
     # UI thread - before the selection is handed off to the background install runspace.
     $PackagesToInstall = Resolve-WinUtilPrerequisites -PackagesToInstall $PackagesToInstall
@@ -8458,6 +8558,19 @@ function Invoke-WPFInstall {
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Install" -Message "Install package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), direct=$(@($packagesDirect).Count), github=$(@($packagesGithub).Count), npm=$(@($packagesNpm).Count), wslFeature=$(@($packagesWslFeature).Count), wslDistro=$(@($packagesWslDistro).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count)"
 
+        # Passed to every bucket installer below so their existing milestone log lines (download
+        # started, extracting, installing, ...) also update the shared progress label - without
+        # this, a single-package bucket showed one static label for however long the whole
+        # install took (confirmed live: Streaming Library Manager looked frozen at 0% the entire
+        # time). Only updates the Label, not Percent - Percent is still driven by whole-package
+        # completion below, this just proves the app is actually still doing something between
+        # those points. $null when there's no UI to update (e.g. -Preset/-Config unattended runs).
+        $progressCallback = if ($hasUI) {
+            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
+        } else {
+            $null
+        }
+
         try {
             $sync.ProcessRunning = $true
             if ($hasUI) {
@@ -8474,29 +8587,35 @@ function Invoke-WPFInstall {
             # unconditionally first and the WSL feature/distro buckets only ran afterward as
             # part of the general bucket loop below.
             foreach ($installBucket in @(
-                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Installer = { param($pkgs) Install-WinUtilFeatureWSL -Packages $pkgs } },
-                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Installer = { param($pkgs) Install-WinUtilWSLDistro -Packages $pkgs } }
+                @{ Packages = $packagesWslFeature; Installer = { param($pkgs, $cb) Install-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslDistro; Installer = { param($pkgs, $cb) Install-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
                 # missing bucket is correctly treated as empty here, instead of falling through
                 # to the installer call below with $null and crashing on its Mandatory
                 # [object[]] parameter ("Cannot bind argument ... because it is null").
                 $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
-                if ($bucketPackages.Count -eq 0) { continue }
 
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                # One package at a time, not the whole bucket in a single call - each installer
+                # (via -ProgressCallback above) already reports its own milestones, but a bucket
+                # with more than one package still needs its OWN per-package percent movement,
+                # the same granularity the winget loop below already has.
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                & $installBucket.Installer $bucketPackages
+                    & $installBucket.Installer @($pkg) $progressCallback
 
-                $completedPackages += $bucketPackages.Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 
@@ -8540,7 +8659,7 @@ function Invoke-WPFInstall {
                 }
 
                 Install-WinUtilChoco
-                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+                $installResults = Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco -ProgressCallback $progressCallback
                 foreach ($r in $installResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
@@ -8564,29 +8683,33 @@ function Invoke-WPFInstall {
             }
 
             foreach ($installBucket in @(
-                @{ Packages = $packagesDirect; Label = "direct-download"; Installer = { param($pkgs) Install-WinUtilProgramDirect -Packages $pkgs } },
-                @{ Packages = $packagesGithub; Label = "GitHub release"; Installer = { param($pkgs) Install-WinUtilProgramGithub -Packages $pkgs } },
-                @{ Packages = $packagesNpm; Label = "npm"; Installer = { param($pkgs) Install-WinUtilProgramNpm -Packages $pkgs } },
-                @{ Packages = $packagesWslCommand; Label = "WSL command"; Installer = { param($pkgs) Install-WinUtilWSLCommand -Packages $pkgs } },
-                @{ Packages = $packagesStreamLinkManager; Label = "Streaming Library Manager"; Installer = { param($pkgs) Install-WinUtilStreamLinkManager -Packages $pkgs } }
+                @{ Packages = $packagesDirect; Installer = { param($pkgs, $cb) Install-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesGithub; Installer = { param($pkgs, $cb) Install-WinUtilProgramGithub -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesNpm; Installer = { param($pkgs, $cb) Install-WinUtilProgramNpm -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; Installer = { param($pkgs, $cb) Install-WinUtilWSLCommand -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; Installer = { param($pkgs, $cb) Install-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
             )) {
                 # @($null).Count is 1, not 0 - see the WSL bucket loop above for why this matters.
                 $bucketPackages = @($installBucket.Packages | Where-Object { $_ })
-                if ($bucketPackages.Count -eq 0) { continue }
 
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $($installBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                # One package at a time - see the WSL bucket loop above for why (per-package
+                # percent movement plus each installer's own -ProgressCallback milestones).
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installing $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                & $installBucket.Installer $bucketPackages
+                    & $installBucket.Installer @($pkg) $progressCallback
 
-                $completedPackages += $bucketPackages.Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $($installBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Installed $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 
@@ -9783,6 +9906,11 @@ function Invoke-WPFUnInstall {
 
     if($confirm -eq "No") {return}
 
+    # Shown right after confirmation, not just once the background runspace starts below - see
+    # Invoke-WPFInstall.ps1's matching comment for why (the runspace start + bucket resolution
+    # below can itself take a moment with no visible feedback otherwise).
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Preparing uninstall..." -Percent 0
+
     $ManagerPreference = $sync.preferences.packagemanager
     Write-WinUtilLog -Component "Uninstall" -Message "Uninstall requested for $(@($PackagesToUninstall).Count) selected package(s) using preference: $ManagerPreference"
     $packageSummary = Get-WinUtilPackageLogSummary -Packages $PackagesToUninstall -Preference $ManagerPreference
@@ -9838,6 +9966,13 @@ function Invoke-WPFUnInstall {
         $failedPackages = [System.Collections.Generic.List[string]]::new()
         Write-WinUtilLog -Component "Uninstall" -Message "Uninstall package manager split: winget=$(@($packagesWinget).Count), choco=$(@($packagesChoco).Count), npm=$(@($packagesNpm).Count), direct=$(@($packagesDirect).Count), wslCommand=$(@($packagesWslCommand).Count), streamLinkManager=$(@($packagesStreamLinkManager).Count), wslDistro=$(@($packagesWslDistro).Count), wslFeature=$(@($packagesWslFeature).Count), unsupported=$($unsupported.Count)"
 
+        # See Invoke-WPFInstall.ps1's matching comment for why this exists and what it does.
+        $progressCallback = if ($hasUI) {
+            { param($message) Set-WinUtilTweaksProgressIndicator -Visible $true -Label $message }
+        } else {
+            $null
+        }
+
         try {
             $sync.ProcessRunning = $true
             if ($hasUI) {
@@ -9883,7 +10018,7 @@ function Invoke-WPFUnInstall {
                     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Chocolatey packages ($position/$totalPackages)" -Percent $startPercent
                 }
 
-                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco
+                $uninstallResults = Install-WinUtilProgramChoco -Action Uninstall -Programs $packagesChoco -ProgressCallback $progressCallback
                 foreach ($r in $uninstallResults) {
                     if (-not $r.Success) {
                         $failedPackages.Add($(if ($packageNameById.ContainsKey($r.Program)) { $packageNameById[$r.Program] } else { $r.Program }))
@@ -9896,65 +10031,37 @@ function Invoke-WPFUnInstall {
                     Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
                 }
             }
-            if ($packagesNpm.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling npm packages ($position/$totalPackages)" -Percent $startPercent
-                }
+            foreach ($uninstallBucket in @(
+                @{ Packages = $packagesNpm; Uninstaller = { param($pkgs, $cb) Install-WinUtilProgramNpm -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesDirect; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilProgramDirect -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslCommand; Uninstaller = { param($pkgs, $cb) Install-WinUtilWSLCommand -Action Uninstall -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesStreamLinkManager; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilStreamLinkManager -Packages $pkgs -ProgressCallback $cb } }
+            )) {
+                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
+                # missing bucket is correctly treated as empty here, instead of falling through
+                # to the uninstaller call below with $null and crashing on its Mandatory
+                # [object[]] parameter ("Cannot bind argument ... because it is null").
+                $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
 
-                Install-WinUtilProgramNpm -Action Uninstall -Packages $packagesNpm
-                $completedPackages += @($packagesNpm).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled npm packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
-                }
-            }
-            if ($packagesDirect.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling direct-install packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                # One package at a time - see Invoke-WPFInstall.ps1's matching comment for why
+                # (per-package percent movement plus each uninstaller's own -ProgressCallback
+                # milestones).
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                Uninstall-WinUtilProgramDirect -Packages $packagesDirect
-                $completedPackages += @($packagesDirect).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled direct-install packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
-                }
-            }
-            if ($packagesWslCommand.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling WSL command packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
 
-                Install-WinUtilWSLCommand -Action Uninstall -Packages $packagesWslCommand
-                $completedPackages += @($packagesWslCommand).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled WSL command packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
-                }
-            }
-
-            if ($packagesStreamLinkManager.Count -gt 0) {
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling Streaming Library Manager ($position/$totalPackages)" -Percent $startPercent
-                }
-
-                Uninstall-WinUtilStreamLinkManager -Packages $packagesStreamLinkManager
-                $completedPackages += @($packagesStreamLinkManager).Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled Streaming Library Manager ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 
@@ -9962,29 +10069,27 @@ function Invoke-WPFUnInstall {
             # distro(s) itself, so running the distro bucket first just means that work is
             # already done (and skipped as a no-op) by the time the feature bucket reaches it.
             foreach ($uninstallBucket in @(
-                @{ Packages = $packagesWslDistro; Label = "WSL distro"; Uninstaller = { param($pkgs) Uninstall-WinUtilWSLDistro -Packages $pkgs } },
-                @{ Packages = $packagesWslFeature; Label = "WSL2 feature"; Uninstaller = { param($pkgs) Uninstall-WinUtilFeatureWSL -Packages $pkgs } }
+                @{ Packages = $packagesWslDistro; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilWSLDistro -Packages $pkgs -ProgressCallback $cb } },
+                @{ Packages = $packagesWslFeature; Uninstaller = { param($pkgs, $cb) Uninstall-WinUtilFeatureWSL -Packages $pkgs -ProgressCallback $cb } }
             )) {
-                # @($null).Count is 1, not 0 - filtering out falsy entries first means a null or
-                # missing bucket is correctly treated as empty here, instead of falling through
-                # to the uninstaller call below with $null and crashing on its Mandatory
-                # [object[]] parameter ("Cannot bind argument ... because it is null").
                 $bucketPackages = @($uninstallBucket.Packages | Where-Object { $_ })
-                if ($bucketPackages.Count -eq 0) { continue }
 
-                $position = $completedPackages + 1
-                $startPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $($uninstallBucket.Label) packages ($position/$totalPackages)" -Percent $startPercent
-                }
+                foreach ($pkg in $bucketPackages) {
+                    $pkgName = $pkg.content
+                    $position = $completedPackages + 1
+                    $startPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalling $pkgName ($position/$totalPackages)" -Percent $startPercent
+                    }
 
-                & $uninstallBucket.Uninstaller $bucketPackages
+                    & $uninstallBucket.Uninstaller @($pkg) $progressCallback
 
-                $completedPackages += $bucketPackages.Count
-                $completedPercent = [int](($completedPackages / $totalPackages) * 100)
-                if ($hasUI) {
-                    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $($uninstallBucket.Label) packages ($completedPackages/$totalPackages)" -Percent $completedPercent
-                    Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    $completedPackages++
+                    $completedPercent = [int](($completedPackages / $totalPackages) * 100)
+                    if ($hasUI) {
+                        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Uninstalled $pkgName ($completedPackages/$totalPackages)" -Percent $completedPercent
+                        Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -value ($completedPercent / 100) }
+                    }
                 }
             }
 
@@ -10411,7 +10516,7 @@ $sync.configs.applications = @'
     "content": "VLC",
     "description": "VLC media player is a free, open-source, cross-platform multimedia player that plays most local video/audio files and discs, by VideoLAN.",
     "link": "https://www.videolan.org/vlc/",
-    "icon": "https://upload.wikimedia.org/wikipedia/commons/3/38/VLC_icon.png",
+    "icon": "https://images.videolan.org/images/favicon.ico",
     "handle": "VideoLAN",
     "winget": "VideoLAN.VLC",
     "foss": true

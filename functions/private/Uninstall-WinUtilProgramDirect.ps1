@@ -14,10 +14,15 @@ Function Uninstall-WinUtilProgramDirect {
         Start-WinUtilProcessAsStandardUserNoWait rather than the waiting variant since this
         relaunch is the same "never exits, don't wait for it" shape as that function's no-args
         interactive branch (the installer stays open for the user to click Uninstall in it).
+
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
@@ -25,6 +30,7 @@ Function Uninstall-WinUtilProgramDirect {
 
         if (-not [string]::IsNullOrWhiteSpace($package.uninstallCommand)) {
             Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
+            if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
             try {
                 & ([scriptblock]::Create($package.uninstallCommand))
                 Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
@@ -41,6 +47,7 @@ Function Uninstall-WinUtilProgramDirect {
             $dest = Join-Path $env:TEMP "$name-uninstall$ext"
 
             Write-WinUtilLog -Component "Package" -Message "Downloading $name installer (for uninstall) from $url"
+            if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name uninstaller..." } catch {} }
             try {
                 Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 60
             } catch {

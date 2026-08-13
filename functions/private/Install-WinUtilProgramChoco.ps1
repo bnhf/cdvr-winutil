@@ -18,6 +18,12 @@ function Install-WinUtilProgramChoco {
         attempt succeeded. Choco runs one batched command per install/upgrade/uninstall group
         rather than one call per package, so every program in the same batch shares that
         batch's exit code/outcome - the same granularity choco itself gives us.
+
+    .DESCRIPTION
+        ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
+        function's docstring for why it exists. Only fires once per batch (install/upgrade/
+        uninstall), matching the granularity described above - there's no per-package signal to
+        report mid-batch since choco itself runs the whole group as one process.
     #>
     param (
         [Parameter(Mandatory=$true)]
@@ -25,7 +31,9 @@ function Install-WinUtilProgramChoco {
         [string]$Action,
 
         [Parameter(Mandatory=$true)]
-        [string[]]$Programs
+        [string[]]$Programs,
+
+        [scriptblock]$ProgressCallback
     )
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -33,6 +41,7 @@ function Install-WinUtilProgramChoco {
     if ($Action -eq 'Uninstall') {
         $arguments = "uninstall $Programs -y"
         Write-WinUtilLog -Component "Package" -Message "Uninstall choco package(s): $($Programs -join ', ')"
+        if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling via choco: $($Programs -join ', ')..." } catch {} }
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $success = $process.ExitCode -eq 0
         if ($success) {
@@ -70,6 +79,7 @@ function Install-WinUtilProgramChoco {
     if ($toInstall.Count -gt 0) {
         $arguments = "install $toInstall -y"
         Write-WinUtilLog -Component "Package" -Message "Install choco package(s): $($toInstall -join ', ')"
+        if ($ProgressCallback) { try { & $ProgressCallback "Installing via choco: $($toInstall -join ', ')..." } catch {} }
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $success = $process.ExitCode -eq 0
         if ($success) {
@@ -85,6 +95,7 @@ function Install-WinUtilProgramChoco {
     if ($toUpgrade.Count -gt 0) {
         $arguments = "upgrade $toUpgrade -y"
         Write-WinUtilLog -Component "Package" -Message "Upgrade already-installed choco package(s): $($toUpgrade -join ', ')"
+        if ($ProgressCallback) { try { & $ProgressCallback "Upgrading via choco: $($toUpgrade -join ', ')..." } catch {} }
         $process = Start-Process -FilePath choco -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $success = $process.ExitCode -eq 0
         if ($success) {

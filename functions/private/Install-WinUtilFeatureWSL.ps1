@@ -20,15 +20,21 @@ Function Install-WinUtilFeatureWSL {
         than plain strings, so each is converted to its plain .Exception.Message before
         Out-String sees it - see Install-WinUtilWSLCommand.ps1's docstring for the confirmed real
         case (a genuinely successful install logging what looked like a crash).
+
+        ProgressCallback works the same way as Install-WinUtilWSLCommand's - see that function's
+        docstring for why it only needs to cover the gap before -OnWaiting's own updates start.
     #>
     param (
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     foreach ($package in $Packages) {
         $name = $package.content
         Write-WinUtilLog -Component "Package" -Message "Enabling WSL2 ($name)"
+        if ($ProgressCallback) { try { & $ProgressCallback "Enabling WSL2..." } catch {} }
 
         $output = Invoke-WinUtilWithTimeout -TimeoutSeconds 300 -DefaultValue $null -OnWaitingIntervalSeconds 20 -OnWaiting {
             param($elapsedSeconds)

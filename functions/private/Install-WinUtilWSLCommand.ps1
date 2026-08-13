@@ -63,13 +63,20 @@ Function Install-WinUtilWSLCommand {
         that function, there's no independent way to verify an arbitrary command's success after
         a timeout, so a timeout here is logged as a real, if inconclusive, warning rather than
         silently assumed fine.
+
+        ProgressCallback, when supplied, is invoked once per package right before it starts
+        running - unlike the direct-download installers, this already reports live progress
+        during a long run via -OnWaiting above, so the callback here only needs to cover the gap
+        before that first fires (up to OnWaitingIntervalSeconds after starting).
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
         [string]$Action = "Install",
 
         [Parameter(Mandatory = $true)]
-        [object[]]$Packages
+        [object[]]$Packages,
+
+        [scriptblock]$ProgressCallback
     )
 
     $lanIp = Get-WinUtilLanIPAddress
@@ -111,6 +118,7 @@ Function Install-WinUtilWSLCommand {
         $wslTempPath = "\\wsl.localhost\$distro\tmp\$scriptName"
 
         Write-WinUtilLog -Component "Package" -Message "Running $name $($Action.ToLower()) inside WSL distro $distro"
+        if ($ProgressCallback) { try { & $ProgressCallback "Running $name $($Action.ToLower()) inside WSL..." } catch {} }
         try {
             Set-WinUtilNoBomFileContent -Path $wslTempPath -Value $command
 

@@ -43,13 +43,40 @@ BeforeAll {
         param($Action, $Programs)
     }
     function Install-WinUtilProgramChoco {
-        param($Action, $Programs)
+        param($Action, $Programs, $ProgressCallback)
     }
     function Install-WinUtilFeatureWSL {
-        param($Packages)
+        param($Packages, $ProgressCallback)
     }
     function Install-WinUtilWSLDistro {
-        param($Packages)
+        param($Packages, $ProgressCallback)
+    }
+    function Install-WinUtilProgramDirect {
+        param($Packages, $ProgressCallback)
+    }
+    function Install-WinUtilProgramGithub {
+        param($Packages, $ProgressCallback)
+    }
+    function Install-WinUtilProgramNpm {
+        param($Action, $Packages, $ProgressCallback)
+    }
+    function Install-WinUtilWSLCommand {
+        param($Action, $Packages, $ProgressCallback)
+    }
+    function Install-WinUtilStreamLinkManager {
+        param($Packages, $ProgressCallback)
+    }
+    function Uninstall-WinUtilProgramDirect {
+        param($Packages, $ProgressCallback)
+    }
+    function Uninstall-WinUtilStreamLinkManager {
+        param($Packages, $ProgressCallback)
+    }
+    function Uninstall-WinUtilWSLDistro {
+        param($Packages, $ProgressCallback)
+    }
+    function Uninstall-WinUtilFeatureWSL {
+        param($Packages, $ProgressCallback)
     }
     function Invoke-WPFUIThread {
         param([scriptblock]$ScriptBlock)
@@ -107,7 +134,12 @@ BeforeAll {
     function script:New-WinUtilPackageSplit {
         param(
             [string[]]$Winget = @(),
-            [string[]]$Choco = @()
+            [string[]]$Choco = @(),
+            [object[]]$Direct = @(),
+            [object[]]$Github = @(),
+            [object[]]$Npm = @(),
+            [object[]]$WslCommand = @(),
+            [object[]]$StreamLinkManager = @()
         )
 
         # Real Get-WinUtilSelectedPackages always returns all 9 buckets as actual (possibly
@@ -116,7 +148,7 @@ BeforeAll {
         # runspace body think there's WSL/direct/etc work to do when there isn't any.
         $packages = @{}
         foreach ($bucketName in @("Winget", "Choco", "Direct", "Github", "Npm", "WslFeature", "WslDistro", "WslCommand", "StreamLinkManager")) {
-            $packages[$bucketName] = [System.Collections.Generic.List[string]]::new()
+            $packages[$bucketName] = [System.Collections.Generic.List[object]]::new()
         }
 
         foreach ($package in $Winget) {
@@ -126,6 +158,12 @@ BeforeAll {
         foreach ($package in $Choco) {
             $null = $packages["Choco"].Add($package)
         }
+
+        foreach ($package in $Direct) { $null = $packages["Direct"].Add($package) }
+        foreach ($package in $Github) { $null = $packages["Github"].Add($package) }
+        foreach ($package in $Npm) { $null = $packages["Npm"].Add($package) }
+        foreach ($package in $WslCommand) { $null = $packages["WslCommand"].Add($package) }
+        foreach ($package in $StreamLinkManager) { $null = $packages["StreamLinkManager"].Add($package) }
 
         $packages
     }
@@ -145,12 +183,33 @@ Describe "Invoke-WPFInstall entrypoint" {
             [pscustomobject]@{ MockHandle = $true }
         }
         Mock Write-WinUtilLog { }
+        Mock Set-WinUtilTweaksProgressIndicator { }
     }
 
     AfterEach {
         Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name capturedInstallScriptBlock -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name capturedInstallParameterList -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "shows the progress bar immediately, before prerequisite/prompt resolution or the background runspace starts" {
+        # Regression guard: confirmed live, a click that goes on to do real work (checking
+        # prerequisites, resolving prompts, spinning up the background runspace) showed nothing
+        # at all until the runspace itself got around to its own first progress update - a click
+        # that looked like it did nothing.
+        Invoke-WPFInstall
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "Preparing install..." -and $Percent -eq 0
+        }
+    }
+
+    It "does not show the progress bar when there's nothing selected or an install is already running" {
+        New-WinUtilInstallTestContext
+
+        Invoke-WPFInstall
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 0 -Exactly
     }
 
     It "queues selected packages with the configured package manager preference" {
@@ -237,6 +296,13 @@ Describe "Invoke-WPFInstall runspace body" {
         Mock Install-WinUtilChoco { }
         Mock Install-WinUtilProgramWinget { }
         Mock Install-WinUtilProgramChoco { }
+        Mock Install-WinUtilProgramDirect { }
+        Mock Install-WinUtilProgramGithub { }
+        Mock Install-WinUtilProgramNpm { }
+        Mock Install-WinUtilWSLCommand { }
+        Mock Install-WinUtilStreamLinkManager { }
+        Mock Install-WinUtilFeatureWSL { }
+        Mock Install-WinUtilWSLDistro { }
         Mock Invoke-WPFUIThread { }
         Mock Write-WinUtilLog { }
         Mock Write-Host { }
@@ -390,6 +456,59 @@ Describe "Invoke-WPFInstall runspace body" {
         Should -Invoke -CommandName Install-WinUtilWSLDistro -Times 1 -Exactly -ParameterFilter { @($Packages) -join "|" -eq "debian" }
     }
 
+    It "installs each package in a direct-download-style bucket one at a time, with its own progress step, not the whole bucket in one call" {
+        # Regression guard: these buckets used to be handed to the installer as one call with
+        # the whole array - a bucket with more than one package showed no progress movement
+        # between them, and (confirmed live for a single-package bucket, Streaming Library
+        # Manager) the label sat frozen for however long the entire call took.
+        $pkgA = [pscustomobject]@{ content = "AppA"; url = "https://example.com/a.exe" }
+        $pkgB = [pscustomobject]@{ content = "AppB"; url = "https://example.com/b.exe" }
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Direct @($pkgA, $pkgB)
+        }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Install-WinUtilProgramDirect -Times 2 -Exactly
+        Should -Invoke -CommandName Install-WinUtilProgramDirect -Times 1 -Exactly -ParameterFilter {
+            @($Packages).Count -eq 1 -and $Packages[0].content -eq "AppA"
+        }
+        Should -Invoke -CommandName Install-WinUtilProgramDirect -Times 1 -Exactly -ParameterFilter {
+            @($Packages).Count -eq 1 -and $Packages[0].content -eq "AppB"
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Installing AppA (1/2)" -and $Percent -eq 0
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Installed AppA (1/2)" -and $Percent -eq 50
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Installing AppB (2/2)" -and $Percent -eq 50
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Installed AppB (2/2)" -and $Percent -eq 100
+        }
+    }
+
+    It "passes a working ProgressCallback into each installer so its own milestones update the shared label" {
+        $pkg = [pscustomobject]@{ content = "AppA"; url = "https://example.com/a.exe" }
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Direct @($pkg)
+        }
+        Mock Install-WinUtilProgramDirect {
+            param($Packages, $ProgressCallback)
+            & $ProgressCallback "Downloading AppA..."
+        }
+
+        Invoke-WPFInstall
+        & $script:capturedInstallScriptBlock -PackagesToInstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "Downloading AppA..."
+        }
+    }
+
     It "shows failure progress, sets taskbar error state, and clears ProcessRunning on failure" {
         Mock Install-WinUtilProgramWinget { throw "winget failed" }
 
@@ -463,12 +582,29 @@ Describe "Invoke-WPFUnInstall entrypoint" {
             [pscustomobject]@{ MockHandle = $true }
         }
         Mock Write-WinUtilLog { }
+        Mock Set-WinUtilTweaksProgressIndicator { }
     }
 
     AfterEach {
         Remove-Variable -Name sync -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name capturedUninstallScriptBlock -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable -Name capturedUninstallParameterList -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "shows the progress bar immediately after confirmation, before the background runspace starts" {
+        Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "Preparing uninstall..." -and $Percent -eq 0
+        }
+    }
+
+    It "does not show the progress bar when uninstall is declined" {
+        Mock Show-WinUtilMessage { "No" } -ParameterFilter { $Title -eq "Are you sure?" }
+
+        Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 0 -Exactly
     }
 
     It "confirms and queues selected packages with the configured package manager preference" {
@@ -548,6 +684,12 @@ Describe "Invoke-WPFUnInstall runspace body" {
         Mock Set-WinUtilTweaksProgressIndicator { }
         Mock Install-WinUtilProgramWinget { }
         Mock Install-WinUtilProgramChoco { }
+        Mock Install-WinUtilProgramNpm { }
+        Mock Install-WinUtilWSLCommand { }
+        Mock Uninstall-WinUtilProgramDirect { }
+        Mock Uninstall-WinUtilStreamLinkManager { }
+        Mock Uninstall-WinUtilWSLDistro { }
+        Mock Uninstall-WinUtilFeatureWSL { }
         Mock Invoke-WPFUIThread { }
         Mock Write-WinUtilLog { }
         Mock Write-Host { }
@@ -595,6 +737,49 @@ Describe "Invoke-WPFUnInstall runspace body" {
             $ScriptBlock.ToString() -like '*Set-WinUtilTaskbaritem -state "None" -overlay "checkmark"*'
         }
         $script:sync.ProcessRunning | Should -BeFalse
+    }
+
+    It "uninstalls each package in a direct-uninstall-style bucket one at a time, with its own progress step" {
+        $pkgA = [pscustomobject]@{ content = "AppA"; uninstallCommand = "Remove-Item C:\AppA" }
+        $pkgB = [pscustomobject]@{ content = "AppB"; uninstallCommand = "Remove-Item C:\AppB" }
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Direct @($pkgA, $pkgB)
+        }
+
+        Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
+        & $script:capturedUninstallScriptBlock -PackagesToUninstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Uninstall-WinUtilProgramDirect -Times 2 -Exactly
+        Should -Invoke -CommandName Uninstall-WinUtilProgramDirect -Times 1 -Exactly -ParameterFilter {
+            @($Packages).Count -eq 1 -and $Packages[0].content -eq "AppA"
+        }
+        Should -Invoke -CommandName Uninstall-WinUtilProgramDirect -Times 1 -Exactly -ParameterFilter {
+            @($Packages).Count -eq 1 -and $Packages[0].content -eq "AppB"
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Uninstalling AppA (1/2)" -and $Percent -eq 0
+        }
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Label -eq "Uninstalling AppB (2/2)" -and $Percent -eq 50
+        }
+    }
+
+    It "passes a working ProgressCallback into each uninstaller so its own milestones update the shared label" {
+        $pkg = [pscustomobject]@{ content = "AppA"; uninstallCommand = "Remove-Item C:\AppA" }
+        Mock Get-WinUtilSelectedPackages {
+            New-WinUtilPackageSplit -Direct @($pkg)
+        }
+        Mock Uninstall-WinUtilProgramDirect {
+            param($Packages, $ProgressCallback)
+            & $ProgressCallback "Uninstalling AppA..."
+        }
+
+        Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
+        & $script:capturedUninstallScriptBlock -PackagesToUninstall @($script:package) -ManagerPreference "Winget"
+
+        Should -Invoke -CommandName Set-WinUtilTweaksProgressIndicator -Times 1 -Exactly -ParameterFilter {
+            $Visible -eq $true -and $Label -eq "Uninstalling AppA..."
+        }
     }
 
     It "shows failure progress, sets taskbar error state, and clears ProcessRunning on failure" {
