@@ -96,10 +96,16 @@ BeforeAll {
             [string]$Choco = "git"
         )
 
+        # Matches the real catalog object shape (config/applications.json) exactly - "content"
+        # and "description" only, no separate "Name"/"Description" fields. An earlier version of
+        # this fixture carried both, which meant Invoke-WPFUnInstall.ps1's own real bug (its
+        # confirmation dialog selected "Name"/"Description" - fields that don't exist on real
+        # catalog objects, only "content"/"description" do - leaving the Name column blank for
+        # every app) went undetected here: the fixture's extra "Name" field happened to satisfy
+        # the dialog's (wrong) property lookup even though production objects never have one.
         [pscustomobject]@{
-            Name = $Name
             content = $Name
-            Description = "$Name package"
+            description = "$Name package"
             winget = $Winget
             choco = $Choco
         }
@@ -628,8 +634,15 @@ Describe "Invoke-WPFUnInstall entrypoint" {
         Invoke-WPFUnInstall -PackagesToUninstall @($script:package)
 
         Should -Invoke -CommandName Show-WinUtilMessage -Times 1 -Exactly -ParameterFilter {
+            # Regression guard for a real production bug: the confirmation dialog selected
+            # "Name"/"Description" - fields that don't exist on real catalog objects (only
+            # "content"/"description" do) - leaving the Name column blank for every app
+            # regardless of selection. Checking for the package's own description text here
+            # (not just "Git", which could coincidentally appear elsewhere) proves the fix
+            # actually pulls from the correct source properties.
             $Message -like "*This will uninstall the following applications:*" -and
                 $Message -like "*Git*" -and
+                $Message -like "*Git package*" -and
                 $Title -eq "Are you sure?" -and
                 "$Button" -eq "YesNo" -and
                 "$Icon" -eq "Information"

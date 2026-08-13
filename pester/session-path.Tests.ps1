@@ -47,8 +47,11 @@ Describe "Install-WinUtilProgramNpm PATH refresh" {
         Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
 
         Should -Invoke -CommandName Update-WinUtilSessionPath -Times 1 -Exactly
+        # Via cmd.exe /c, not a direct "npm" FilePath - see Install-WinUtilProgramNpm's own
+        # docstring for why (npm is a .cmd batch shim on Windows, and Start-Process -NoNewWindow
+        # can't execute one directly: "%1 is not a valid Win32 application").
         Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
-            $FilePath -eq "npm" -and (@($ArgumentList) -join "|") -eq "install|-g|prismcast"
+            $FilePath -eq "cmd.exe" -and (@($ArgumentList) -join "|") -eq "/c|npm|install|-g|prismcast"
         }
     }
 }

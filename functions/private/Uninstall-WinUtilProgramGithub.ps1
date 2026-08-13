@@ -31,6 +31,23 @@ Function Uninstall-WinUtilProgramGithub {
         uninstalling one is the same "stop the process, delete the folder" approach
         Uninstall-WinUtilStreamLinkManager already uses for the same reason.
 
+        Matching the running process by its install-folder Path alone (an earlier version of
+        this did only that) isn't reliable for every portable app: confirmed live for Pluto for
+        Channels, which - being a large (~200MB) single-file bundle, the standard shape for a
+        PyInstaller "onefile" build - can keep its tray-icon process alive under conditions this
+        Path check misses (e.g. self-extracted resources reported under a different path).
+        Whatever the exact cause, the visible symptom was real and bad: the uninstall logged
+        success while a locked file inside the install folder silently made Remove-Item's own
+        deletion incomplete (a non-terminating per-item error, not one Remove-Item throws as a
+        catchable exception) - so the app kept running (the reported tray icon) AND "Show
+        Installed Apps" kept finding it (the folder, and the file the detection check looks
+        for, both still there). Now matches by process NAME too (derived from whatever file(s)
+        actually exist in the install folder matching the catalog's own assetPattern - the same
+        source of truth Test-WinUtilPortableGithubInstalled's own detection uses), waits briefly
+        for a just-stopped process to actually release its file handles before deleting, and -
+        the fix for the false "uninstalled" success message itself - verifies the folder is
+        actually gone afterward rather than assuming Remove-Item's silence means it worked.
+
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
     #>
@@ -55,20 +72,48 @@ Function Uninstall-WinUtilProgramGithub {
             try {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
+                # Process names the app might be running under, derived from whatever's
+                # actually on disk (not just the catalog's assetPattern string itself, in case
+                # the file was renamed/replaced) - the same folder Install-WinUtilProgramGithub
+                # always uses for this app.
+                $runningNames = @()
+                if ($package.assetPattern -and (Test-Path $installDir)) {
+                    $runningNames = @(Get-ChildItem -Path $installDir -Filter $package.assetPattern -ErrorAction SilentlyContinue |
+                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+                }
+
                 $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $runningFromInstallDir = $false
-                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $runningFromInstallDir
+                    $matchesInstallDir = $false
+                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $matchesInstallDir -or ($runningNames -contains $_.Name)
                 })
                 foreach ($runningInstance in $runningInstances) {
                     Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
                 }
 
-                if (Test-Path $installDir) {
-                    Remove-Item $installDir -Recurse -Force
+                # A just-stopped process doesn't always release its file handles instantly -
+                # give it a moment before trying to delete, rather than racing it.
+                if ($runningInstances.Count -gt 0) {
+                    $deadline = (Get-Date).AddSeconds(5)
+                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
+                        Start-Sleep -Milliseconds 250
+                    }
                 }
 
-                Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+                if (Test-Path $installDir) {
+                    Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+
+                # Remove-Item on a directory containing a still-locked file reports a
+                # non-terminating per-item error, not one this function's own catch below would
+                # ever see - checking the result directly is what actually catches that, instead
+                # of logging a false "uninstalled" success while the folder (and the app) are
+                # still there.
+                if (Test-Path $installDir) {
+                    Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name uninstall incomplete: $installDir still exists, likely because a file inside it is still in use. Close $name (check the system tray) and try again."
+                } else {
+                    Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+                }
             } catch {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall ${name}: $_"
             }

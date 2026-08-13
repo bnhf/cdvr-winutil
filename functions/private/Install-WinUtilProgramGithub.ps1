@@ -118,13 +118,35 @@ Function Install-WinUtilProgramGithub {
                 # to [System.Diagnostics.Process[]] on the real cmdlet and can't be satisfied by
                 # a test double) - matches the pattern Start-WinUtilProcessAsStandardUserNoWait's
                 # own process lookup already uses.
+                #
+                # Matches by process NAME too (the file currently on disk, plus the incoming
+                # asset's own name), not just install-folder Path - confirmed live for Pluto for
+                # Channels (a large single-file bundle, the standard shape for a PyInstaller
+                # "onefile" build) that Path alone can miss a still-running instance, which then
+                # blocked the file replace below with no clear error.
+                $existingNames = @()
+                if (Test-Path $installDir) {
+                    $existingNames = @(Get-ChildItem -Path $installDir -ErrorAction SilentlyContinue |
+                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+                }
+                $runningNames = @($existingNames + [IO.Path]::GetFileNameWithoutExtension($asset.name) | Select-Object -Unique)
+
                 $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $runningFromInstallDir = $false
-                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $runningFromInstallDir
+                    $matchesInstallDir = $false
+                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $matchesInstallDir -or ($runningNames -contains $_.Name)
                 })
                 foreach ($runningInstance in $runningInstances) {
                     Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
+                }
+
+                # A just-stopped process doesn't always release its file handles instantly -
+                # give it a moment before the Move-Item below, rather than racing it.
+                if ($runningInstances.Count -gt 0) {
+                    $deadline = (Get-Date).AddSeconds(5)
+                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
+                        Start-Sleep -Milliseconds 250
+                    }
                 }
 
                 New-Item -ItemType Directory -Path $installDir -Force | Out-Null

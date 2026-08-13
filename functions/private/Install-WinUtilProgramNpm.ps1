@@ -7,6 +7,16 @@ Function Install-WinUtilProgramNpm {
     .DESCRIPTION
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
+
+        Runs npm via "cmd.exe /c", not Start-Process -FilePath "npm" directly - confirmed live,
+        the direct form fails with "%1 is not a valid Win32 application." The Node.js Windows
+        installer's own "npm" is npm.cmd, a batch shim, not a real .exe; -NoNewWindow forces
+        Start-Process's underlying ProcessStartInfo.UseShellExecute to $false, which performs a
+        literal CreateProcess-style launch with no file-association resolution, so it tries to
+        execute the batch file's raw bytes as a native binary instead of dispatching it through
+        cmd.exe the way typing "npm ..." at a prompt would. This exact error was previously
+        masked by an earlier PATH-detection bug (npm wasn't found on PATH at all, so this call
+        was never reached) - fixing that surfaced this next, previously-unreachable failure.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -39,7 +49,7 @@ Function Install-WinUtilProgramNpm {
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
         if ($ProgressCallback) { try { & $ProgressCallback "$Action $name via npm..." } catch {} }
-        $process = Start-Process -FilePath "npm" -ArgumentList @($npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
+        $process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "npm", $npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
 
         # Some npm-distributed tools need a separate step to actually start running (or set up

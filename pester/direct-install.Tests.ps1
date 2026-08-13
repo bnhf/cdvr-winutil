@@ -204,6 +204,11 @@ Describe "Install-WinUtilProgramGithub" {
         Mock New-Item { }
         Mock Move-Item { }
         Mock Get-Process { }
+        # The post-Stop-Process polling wait re-checks Get-Process -Id per stopped process -
+        # returning nothing for that specific shape (rather than matching the broader "any
+        # Get-Process call" mocks below) simulates an immediate exit, so tests don't actually
+        # burn wall-clock time sitting in that wait loop.
+        Mock Get-Process { $null } -ParameterFilter { $null -ne $Id }
         Mock Stop-Process { }
     }
 
@@ -318,12 +323,15 @@ Describe "Install-WinUtilProgramGithub" {
 
         It "stops a previous run of the app before overwriting its files, so a reinstall isn't blocked by a file lock" {
             $installDir = Get-WinUtilPortableGithubInstallDir -Name "Pluto for Channels"
+            # No -Id filter here, so this only serves the initial bare enumeration call - the
+            # BeforeEach's -Id-filtered mock still handles the post-stop polling check below,
+            # simulating an immediate exit rather than actually waiting out the polling loop.
             Mock Get-Process {
                 @(
                     [pscustomobject]@{ Id = 4242; Path = Join-Path $installDir "PlutoForChannels.exe" }
                     [pscustomobject]@{ Id = 9999; Path = "C:\Windows\explorer.exe" }
                 )
-            }
+            } -ParameterFilter { $null -eq $Id }
             $package = [pscustomobject]@{ content = "Pluto for Channels"; repo = "nuken/Pluto-Windows_4C"; assetPattern = "PlutoForChannels*.exe"; portable = $true }
 
             Install-WinUtilProgramGithub -Packages @($package)

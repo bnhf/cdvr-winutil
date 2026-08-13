@@ -23,7 +23,11 @@ function Invoke-WPFUnInstall {
 
     $ButtonType = "YesNo"
     $MessageboxTitle = "Are you sure?"
-    $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object Name, Description| Out-String)")
+    # Catalog entries use "content"/"description", not "Name"/"Description" - selecting the
+    # literal wrong property names here left the Name column blank for every app, regardless of
+    # what was actually selected (confirmed live). Calculated properties pull from the correct
+    # source fields while still showing friendly column headers.
+    $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object @{Name='Name'; Expression={$_.content}}, @{Name='Description'; Expression={$_.description}} | Out-String)")
     $MessageIcon = "Information"
 
     # Unregistering a WSL distro permanently deletes its filesystem, not just "removes" it -

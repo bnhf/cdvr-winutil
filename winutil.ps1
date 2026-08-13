@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1414
+    Version        : v2026.08.13.1434
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1414"
+$sync.version = "v2026.08.13.1434"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2054,13 +2054,35 @@ Function Install-WinUtilProgramGithub {
                 # to [System.Diagnostics.Process[]] on the real cmdlet and can't be satisfied by
                 # a test double) - matches the pattern Start-WinUtilProcessAsStandardUserNoWait's
                 # own process lookup already uses.
+                #
+                # Matches by process NAME too (the file currently on disk, plus the incoming
+                # asset's own name), not just install-folder Path - confirmed live for Pluto for
+                # Channels (a large single-file bundle, the standard shape for a PyInstaller
+                # "onefile" build) that Path alone can miss a still-running instance, which then
+                # blocked the file replace below with no clear error.
+                $existingNames = @()
+                if (Test-Path $installDir) {
+                    $existingNames = @(Get-ChildItem -Path $installDir -ErrorAction SilentlyContinue |
+                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+                }
+                $runningNames = @($existingNames + [IO.Path]::GetFileNameWithoutExtension($asset.name) | Select-Object -Unique)
+
                 $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $runningFromInstallDir = $false
-                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $runningFromInstallDir
+                    $matchesInstallDir = $false
+                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $matchesInstallDir -or ($runningNames -contains $_.Name)
                 })
                 foreach ($runningInstance in $runningInstances) {
                     Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
+                }
+
+                # A just-stopped process doesn't always release its file handles instantly -
+                # give it a moment before the Move-Item below, rather than racing it.
+                if ($runningInstances.Count -gt 0) {
+                    $deadline = (Get-Date).AddSeconds(5)
+                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
+                        Start-Sleep -Milliseconds 250
+                    }
                 }
 
                 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
@@ -2124,6 +2146,16 @@ Function Install-WinUtilProgramNpm {
     .DESCRIPTION
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
+
+        Runs npm via "cmd.exe /c", not Start-Process -FilePath "npm" directly - confirmed live,
+        the direct form fails with "%1 is not a valid Win32 application." The Node.js Windows
+        installer's own "npm" is npm.cmd, a batch shim, not a real .exe; -NoNewWindow forces
+        Start-Process's underlying ProcessStartInfo.UseShellExecute to $false, which performs a
+        literal CreateProcess-style launch with no file-association resolution, so it tries to
+        execute the batch file's raw bytes as a native binary instead of dispatching it through
+        cmd.exe the way typing "npm ..." at a prompt would. This exact error was previously
+        masked by an earlier PATH-detection bug (npm wasn't found on PATH at all, so this call
+        was never reached) - fixing that surfaced this next, previously-unreachable failure.
     #>
     param (
         [ValidateSet("Install", "Uninstall")]
@@ -2156,7 +2188,7 @@ Function Install-WinUtilProgramNpm {
         $npmVerb = if ($Action -eq "Uninstall") { "uninstall" } else { "install" }
         Write-WinUtilLog -Component "Package" -Message "$Action $name via npm ($npmPackage)"
         if ($ProgressCallback) { try { & $ProgressCallback "$Action $name via npm..." } catch {} }
-        $process = Start-Process -FilePath "npm" -ArgumentList @($npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
+        $process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "npm", $npmVerb, "-g", $npmPackage) -NoNewWindow -Wait -PassThru
         Write-WinUtilLog -Component "Package" -Message "$name npm $($npmVerb) completed (exit code: $($process.ExitCode))"
 
         # Some npm-distributed tools need a separate step to actually start running (or set up
@@ -7789,6 +7821,23 @@ Function Uninstall-WinUtilProgramGithub {
         uninstalling one is the same "stop the process, delete the folder" approach
         Uninstall-WinUtilStreamLinkManager already uses for the same reason.
 
+        Matching the running process by its install-folder Path alone (an earlier version of
+        this did only that) isn't reliable for every portable app: confirmed live for Pluto for
+        Channels, which - being a large (~200MB) single-file bundle, the standard shape for a
+        PyInstaller "onefile" build - can keep its tray-icon process alive under conditions this
+        Path check misses (e.g. self-extracted resources reported under a different path).
+        Whatever the exact cause, the visible symptom was real and bad: the uninstall logged
+        success while a locked file inside the install folder silently made Remove-Item's own
+        deletion incomplete (a non-terminating per-item error, not one Remove-Item throws as a
+        catchable exception) - so the app kept running (the reported tray icon) AND "Show
+        Installed Apps" kept finding it (the folder, and the file the detection check looks
+        for, both still there). Now matches by process NAME too (derived from whatever file(s)
+        actually exist in the install folder matching the catalog's own assetPattern - the same
+        source of truth Test-WinUtilPortableGithubInstalled's own detection uses), waits briefly
+        for a just-stopped process to actually release its file handles before deleting, and -
+        the fix for the false "uninstalled" success message itself - verifies the folder is
+        actually gone afterward rather than assuming Remove-Item's silence means it worked.
+
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
     #>
@@ -7813,20 +7862,48 @@ Function Uninstall-WinUtilProgramGithub {
             try {
                 $installDir = Get-WinUtilPortableGithubInstallDir -Name $name
 
+                # Process names the app might be running under, derived from whatever's
+                # actually on disk (not just the catalog's assetPattern string itself, in case
+                # the file was renamed/replaced) - the same folder Install-WinUtilProgramGithub
+                # always uses for this app.
+                $runningNames = @()
+                if ($package.assetPattern -and (Test-Path $installDir)) {
+                    $runningNames = @(Get-ChildItem -Path $installDir -Filter $package.assetPattern -ErrorAction SilentlyContinue |
+                        ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+                }
+
                 $runningInstances = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                    $runningFromInstallDir = $false
-                    try { $runningFromInstallDir = $_.Path -like "$installDir\*" } catch {}
-                    $runningFromInstallDir
+                    $matchesInstallDir = $false
+                    try { $matchesInstallDir = $_.Path -like "$installDir\*" } catch {}
+                    $matchesInstallDir -or ($runningNames -contains $_.Name)
                 })
                 foreach ($runningInstance in $runningInstances) {
                     Stop-Process -Id $runningInstance.Id -Force -ErrorAction SilentlyContinue
                 }
 
-                if (Test-Path $installDir) {
-                    Remove-Item $installDir -Recurse -Force
+                # A just-stopped process doesn't always release its file handles instantly -
+                # give it a moment before trying to delete, rather than racing it.
+                if ($runningInstances.Count -gt 0) {
+                    $deadline = (Get-Date).AddSeconds(5)
+                    while ((Get-Date) -lt $deadline -and (@($runningInstances.Id | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0)) {
+                        Start-Sleep -Milliseconds 250
+                    }
                 }
 
-                Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+                if (Test-Path $installDir) {
+                    Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+
+                # Remove-Item on a directory containing a still-locked file reports a
+                # non-terminating per-item error, not one this function's own catch below would
+                # ever see - checking the result directly is what actually catches that, instead
+                # of logging a false "uninstalled" success while the folder (and the app) are
+                # still there.
+                if (Test-Path $installDir) {
+                    Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name uninstall incomplete: $installDir still exists, likely because a file inside it is still in use. Close $name (check the system tray) and try again."
+                } else {
+                    Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
+                }
             } catch {
                 Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to uninstall ${name}: $_"
             }
@@ -10543,7 +10620,11 @@ function Invoke-WPFUnInstall {
 
     $ButtonType = "YesNo"
     $MessageboxTitle = "Are you sure?"
-    $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object Name, Description| Out-String)")
+    # Catalog entries use "content"/"description", not "Name"/"Description" - selecting the
+    # literal wrong property names here left the Name column blank for every app, regardless of
+    # what was actually selected (confirmed live). Calculated properties pull from the correct
+    # source fields while still showing friendly column headers.
+    $Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object @{Name='Name'; Expression={$_.content}}, @{Name='Description'; Expression={$_.description}} | Out-String)")
     $MessageIcon = "Information"
 
     # Unregistering a WSL distro permanently deletes its filesystem, not just "removes" it -
