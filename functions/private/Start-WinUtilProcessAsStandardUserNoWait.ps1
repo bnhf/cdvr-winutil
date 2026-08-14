@@ -61,6 +61,16 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         don't control" scenario. Best-effort like the block above - failure here is swallowed
         and never turns into a reported de-elevation failure either.
 
+        The process-path-match search itself is skipped entirely when FilePath is explorer.exe
+        (the link-relay case) rather than merely finding nothing. Confirmed live this was the
+        actual cause of WinUtil appearing to lock up after opening a link: explorer.exe invoked
+        with an argument is a transient relay with no window of its own, so on the (fairly
+        common) occasions it hadn't exited yet by the time the search ran, it matched, and
+        Set-WinUtilProcessForeground then polled for up to its own 15-second timeout waiting for
+        a MainWindowHandle that this relay process was never going to have - blocking on it for
+        nothing every time that race landed the wrong way, since AllowSetForegroundWindow above
+        already does everything this case needs.
+
     .OUTPUTS
         $true if the task was registered and started (the target was launched, though its own
         success/failure afterward is unknown - the same as calling Start-Process and not waiting).
@@ -112,14 +122,16 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         Start-Sleep -Seconds 2
 
         try {
-            $launchedProcess = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                $samePath = $false
-                try { $samePath = $_.Path -eq $FilePath } catch {}
-                $samePath -and $_.StartTime -gt (Get-Date).AddSeconds(-10)
-            } | Sort-Object StartTime -Descending | Select-Object -First 1
+            if ($FilePath -ine "$env:WINDIR\explorer.exe") {
+                $launchedProcess = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $samePath = $false
+                    try { $samePath = $_.Path -eq $FilePath } catch {}
+                    $samePath -and $_.StartTime -gt (Get-Date).AddSeconds(-10)
+                } | Sort-Object StartTime -Descending | Select-Object -First 1
 
-            if ($launchedProcess) {
-                Set-WinUtilProcessForeground -Process $launchedProcess
+                if ($launchedProcess) {
+                    Set-WinUtilProcessForeground -Process $launchedProcess
+                }
             }
         } catch {}
 

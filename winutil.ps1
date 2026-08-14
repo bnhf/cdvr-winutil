@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1807
+    Version        : v2026.08.13.2011
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1807"
+$sync.version = "v2026.08.13.2011"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -5556,6 +5556,16 @@ function Open-WinUtilLink {
         to a normal (elevated) Start-Process on $Target directly if de-elevation itself fails -
         that path was never broken, since Start-Process has always correctly resolved URLs and
         shell paths on its own.
+
+        Runs via Invoke-WPFRunspace rather than inline, the same way Invoke-WPFInstall and
+        Invoke-WPFUnInstall already background their own work - every caller here (the popup's
+        Info/Open/Open2 buttons, a dialog's hyperlink Navigate handler) runs directly on the WPF
+        Dispatcher thread. Confirmed live: calling Start-WinUtilProcessAsStandardUserNoWait
+        inline froze the entire app - Register/Start/Unregister-ScheduledTask plus its own
+        required 2-second settle delay all ran on the UI thread, so every click blocked it for
+        several seconds minimum, looking exactly like a lockup even though it always recovered on
+        its own. Nothing here needs a result back on the calling thread, so there's no reason to
+        make the UI wait for it.
     #>
     param(
         # Not Mandatory: PowerShell's own Mandatory-parameter binding rejects an empty string
@@ -5569,9 +5579,12 @@ function Open-WinUtilLink {
         return
     }
 
-    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "$env:WINDIR\explorer.exe" -ArgumentList @($Target))) {
-        Start-Process -FilePath $Target
-    }
+    Invoke-WPFRunspace -ArgumentList $Target -ScriptBlock {
+        param($Target)
+        if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "$env:WINDIR\explorer.exe" -ArgumentList @($Target))) {
+            Start-Process -FilePath $Target
+        }
+    } | Out-Null
 }
 
 function Remove-WinUtilAPPX {
@@ -7288,6 +7301,16 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         don't control" scenario. Best-effort like the block above - failure here is swallowed
         and never turns into a reported de-elevation failure either.
 
+        The process-path-match search itself is skipped entirely when FilePath is explorer.exe
+        (the link-relay case) rather than merely finding nothing. Confirmed live this was the
+        actual cause of WinUtil appearing to lock up after opening a link: explorer.exe invoked
+        with an argument is a transient relay with no window of its own, so on the (fairly
+        common) occasions it hadn't exited yet by the time the search ran, it matched, and
+        Set-WinUtilProcessForeground then polled for up to its own 15-second timeout waiting for
+        a MainWindowHandle that this relay process was never going to have - blocking on it for
+        nothing every time that race landed the wrong way, since AllowSetForegroundWindow above
+        already does everything this case needs.
+
     .OUTPUTS
         $true if the task was registered and started (the target was launched, though its own
         success/failure afterward is unknown - the same as calling Start-Process and not waiting).
@@ -7339,14 +7362,16 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         Start-Sleep -Seconds 2
 
         try {
-            $launchedProcess = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                $samePath = $false
-                try { $samePath = $_.Path -eq $FilePath } catch {}
-                $samePath -and $_.StartTime -gt (Get-Date).AddSeconds(-10)
-            } | Sort-Object StartTime -Descending | Select-Object -First 1
+            if ($FilePath -ine "$env:WINDIR\explorer.exe") {
+                $launchedProcess = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $samePath = $false
+                    try { $samePath = $_.Path -eq $FilePath } catch {}
+                    $samePath -and $_.StartTime -gt (Get-Date).AddSeconds(-10)
+                } | Sort-Object StartTime -Descending | Select-Object -First 1
 
-            if ($launchedProcess) {
-                Set-WinUtilProcessForeground -Process $launchedProcess
+                if ($launchedProcess) {
+                    Set-WinUtilProcessForeground -Process $launchedProcess
+                }
             }
         } catch {}
 

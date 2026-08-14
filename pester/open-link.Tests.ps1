@@ -8,12 +8,48 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Open-WinUtilLink.ps1")
 
     function Start-WinUtilProcessAsStandardUserNoWait { param($FilePath, $ArgumentList) }
+    function Invoke-WPFRunspace { param($ArgumentList, $ParameterList, [scriptblock]$ScriptBlock) }
 }
 
 Describe "Open-WinUtilLink" {
     BeforeEach {
+        Mock Invoke-WPFRunspace { [pscustomobject]@{ MockHandle = $true } }
+    }
+
+    It "backgrounds the launch via Invoke-WPFRunspace instead of blocking the caller" {
+        # Regression guard: every caller (the popup's Info/Open/Open2 buttons, a dialog
+        # hyperlink's Navigate handler) runs directly on the WPF Dispatcher thread. Confirmed
+        # live: calling Start-WinUtilProcessAsStandardUserNoWait inline froze the whole app for
+        # several seconds on every click (Register/Start/Unregister-ScheduledTask plus its own
+        # required 2-second settle delay), looking exactly like a lockup.
+        Open-WinUtilLink -Target "http://localhost:8089"
+
+        Should -Invoke -CommandName Invoke-WPFRunspace -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList -eq "http://localhost:8089" -and $ScriptBlock -is [scriptblock]
+        }
+    }
+
+    It "does nothing for a blank or missing target, rather than backgrounding a bare de-elevated shell" {
+        Open-WinUtilLink -Target ""
+
+        Should -Invoke -CommandName Invoke-WPFRunspace -Times 0 -Exactly
+    }
+}
+
+Describe "Open-WinUtilLink runspace body" {
+    BeforeEach {
+        $script:capturedScriptBlock = $null
+
+        Mock Invoke-WPFRunspace {
+            $script:capturedScriptBlock = $ScriptBlock
+            [pscustomobject]@{ MockHandle = $true }
+        }
         Mock Start-WinUtilProcessAsStandardUserNoWait { $true }
         Mock Start-Process { }
+    }
+
+    AfterEach {
+        Remove-Variable -Name capturedScriptBlock -Scope Script -ErrorAction SilentlyContinue
     }
 
     It "opens the target de-elevated, not inheriting WinUtil's own elevated context" {
@@ -22,6 +58,7 @@ Describe "Open-WinUtilLink" {
         # live, this launches the default browser (or the target app) as Administrator for
         # something as routine as viewing a homepage or an already-running local web UI.
         Open-WinUtilLink -Target "http://localhost:8089"
+        & $script:capturedScriptBlock "http://localhost:8089"
 
         Should -Invoke -CommandName Start-WinUtilProcessAsStandardUserNoWait -Times 1 -Exactly -ParameterFilter {
             $FilePath -eq "$env:WINDIR\explorer.exe" -and (@($ArgumentList) -join "|") -eq "http://localhost:8089"
@@ -39,6 +76,7 @@ Describe "Open-WinUtilLink" {
         # started, not that its action actually ran. explorer.exe is a real executable Task
         # Scheduler can launch, and it resolves a URL argument the same way Start-Process would.
         Open-WinUtilLink -Target "https://github.com/hjdhjd/prismcast"
+        & $script:capturedScriptBlock "https://github.com/hjdhjd/prismcast"
 
         Should -Invoke -CommandName Start-WinUtilProcessAsStandardUserNoWait -Times 1 -Exactly -ParameterFilter {
             $FilePath -eq "$env:WINDIR\explorer.exe"
@@ -49,16 +87,10 @@ Describe "Open-WinUtilLink" {
         Mock Start-WinUtilProcessAsStandardUserNoWait { $false }
 
         Open-WinUtilLink -Target "http://localhost:8089"
+        & $script:capturedScriptBlock "http://localhost:8089"
 
         Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
             $FilePath -eq "http://localhost:8089"
         }
-    }
-
-    It "does nothing for a blank or missing target, rather than launching a bare de-elevated shell" {
-        Open-WinUtilLink -Target ""
-
-        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUserNoWait -Times 0 -Exactly
-        Should -Invoke -CommandName Start-Process -Times 0 -Exactly
     }
 }

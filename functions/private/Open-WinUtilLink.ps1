@@ -32,6 +32,16 @@ function Open-WinUtilLink {
         to a normal (elevated) Start-Process on $Target directly if de-elevation itself fails -
         that path was never broken, since Start-Process has always correctly resolved URLs and
         shell paths on its own.
+
+        Runs via Invoke-WPFRunspace rather than inline, the same way Invoke-WPFInstall and
+        Invoke-WPFUnInstall already background their own work - every caller here (the popup's
+        Info/Open/Open2 buttons, a dialog's hyperlink Navigate handler) runs directly on the WPF
+        Dispatcher thread. Confirmed live: calling Start-WinUtilProcessAsStandardUserNoWait
+        inline froze the entire app - Register/Start/Unregister-ScheduledTask plus its own
+        required 2-second settle delay all ran on the UI thread, so every click blocked it for
+        several seconds minimum, looking exactly like a lockup even though it always recovered on
+        its own. Nothing here needs a result back on the calling thread, so there's no reason to
+        make the UI wait for it.
     #>
     param(
         # Not Mandatory: PowerShell's own Mandatory-parameter binding rejects an empty string
@@ -45,7 +55,10 @@ function Open-WinUtilLink {
         return
     }
 
-    if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "$env:WINDIR\explorer.exe" -ArgumentList @($Target))) {
-        Start-Process -FilePath $Target
-    }
+    Invoke-WPFRunspace -ArgumentList $Target -ScriptBlock {
+        param($Target)
+        if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath "$env:WINDIR\explorer.exe" -ArgumentList @($Target))) {
+            Start-Process -FilePath $Target
+        }
+    } | Out-Null
 }
