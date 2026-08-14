@@ -312,6 +312,19 @@ Describe "Olivetin application config" {
         $script:olivetin.upgradeInstructions | Should -Match "Portainer"
         $script:olivetin.upgradeInstructions | Should -Match "9000"
     }
+
+    It "passes TZ as a plain IANA zone name, not the raw /etc/localtime symlink target" {
+        # Regression guard: "readlink /etc/localtime" alone returns the full path the symlink
+        # points at (e.g. "/usr/share/zoneinfo/America/Denver"), not the "America/Denver" form
+        # Docker/OliveTin actually expect for TZ - confirmed live, this set the container's
+        # timezone to that literal path instead of resolving it. /etc/timezone (Debian-specific)
+        # already holds the plain zone name and is tried first; the symlink is only a fallback,
+        # with its "/usr/share/zoneinfo/" (or any other) prefix stripped before use.
+        $expectedTzPrefix = [regex]::Escape('$(cat /etc/timezone 2>/dev/null || readlink /etc/localtime | sed')
+        $expectedTzSuffix = [regex]::Escape("sed 's#.*zoneinfo/##')")
+        $script:olivetin.command | Should -Match $expectedTzPrefix
+        $script:olivetin.command | Should -Match $expectedTzSuffix
+    }
 }
 
 Describe "Clicker application config" {
