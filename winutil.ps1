@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.13.1746
+    Version        : v2026.08.13.1807
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.13.1746"
+$sync.version = "v2026.08.13.1807"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -7268,6 +7268,26 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         re-exec as a different process (a real limitation, not attempted here) - a miss just
         means no foreground happens, same as before this existed.
 
+        Also calls AllowSetForegroundWindow(ASFW_ANY) right before starting the task - added
+        after Open-WinUtilLink was switched to call this function with FilePath set to
+        explorer.exe (routing web UI/GUI links through it, not just installer continuations).
+        Confirmed live: everything launched that way opened behind WinUtil's own window. The
+        process-path-match logic above can't fix that for this caller - explorer.exe invoked
+        with an argument either hands off to the already-running shell and exits almost
+        immediately (nothing left to match by the time the 2-second sleep above elapses), or,
+        just as often, the target is a browser that's already running and simply opens a new
+        tab in its existing window - no new process at all, so there's no "just launched"
+        process to find by path regardless of timing. AllowSetForegroundWindow(ASFW_ANY) sidesteps
+        needing to know the target process's identity or window handle at all: called by
+        WinUtil while it still owns the foreground, it grants ANY process permission to
+        successfully call SetForegroundWindow once, system-wide, until the next input event -
+        letting whichever process actually ends up handling the request (a brand-new instance,
+        or an existing one just surfacing a new tab) foreground itself via its own normal
+        activation code. This is the standard Windows-documented mechanism for exactly this
+        "I'm about to trigger something that will show a window shortly after, on a process I
+        don't control" scenario. Best-effort like the block above - failure here is swallowed
+        and never turns into a reported de-elevation failure either.
+
     .OUTPUTS
         $true if the task was registered and started (the target was launched, though its own
         success/failure afterward is unknown - the same as calling Start-Process and not waiting).
@@ -7301,6 +7321,16 @@ function Start-WinUtilProcessAsStandardUserNoWait {
         $task = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
 
         Register-ScheduledTask -TaskName $taskName -InputObject $task -Force -ErrorAction Stop | Out-Null
+
+        try {
+            if (-not ([System.Management.Automation.PSTypeName]'WinUtil.ForegroundPermissionNative').Type) {
+                Add-Type -Namespace WinUtil -Name ForegroundPermissionNative -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
+'@ -ErrorAction Stop
+            }
+            [void][WinUtil.ForegroundPermissionNative]::AllowSetForegroundWindow(-1)  # ASFW_ANY
+        } catch {}
+
         Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
 
         # Give Task Scheduler a moment to actually spawn the process before unregistering the
