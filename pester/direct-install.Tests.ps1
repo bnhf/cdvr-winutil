@@ -8,6 +8,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilProgramDirect.ps1")
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilProgramDirect.ps1")
     . (Join-Path $script:repoRoot "functions\private\Install-WinUtilProgramGithub.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Select-WinUtilGithubReleaseAsset.ps1")
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilPortableGithubInstallDir.ps1")
     . (Join-Path $script:repoRoot "functions\private\Stop-WinUtilProcessByAssetPattern.ps1")
 
@@ -215,6 +216,29 @@ Describe "Install-WinUtilProgramGithub" {
 
         Should -Invoke -CommandName Start-WinUtilProcessAsStandardUserNoWait -Times 1 -Exactly
         Should -Invoke -CommandName Start-Process -Times 0 -Exactly
+    }
+
+    It "downloads the x64 asset, not arm64, when a release publishes both and the pattern matches either" {
+        # Regression guard for the actual reported bug: Clicker's release publishes both
+        # "Clicker-Setup-<version>.exe" and "Clicker-Setup-<version>-arm64.exe" - both match the
+        # catalog's "Clicker-Setup-*.exe" assetPattern, and GitHub's own release API lists the
+        # arm64 asset first (confirmed live against the real repo), so "first match wins" handed
+        # a user on ordinary x64 hardware an installer that can't run there at all.
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                assets = @(
+                    [pscustomobject]@{ name = "Clicker-Setup-1.3.1-arm64.exe"; browser_download_url = "https://example.com/Clicker-Setup-1.3.1-arm64.exe" }
+                    [pscustomobject]@{ name = "Clicker-Setup-1.3.1.exe"; browser_download_url = "https://example.com/Clicker-Setup-1.3.1.exe" }
+                )
+            }
+        }
+        $package = [pscustomobject]@{ content = "Clicker"; repo = "mackid1993/Clicker"; assetPattern = "Clicker-Setup-*.exe" }
+
+        Install-WinUtilProgramGithub -Packages @($package)
+
+        Should -Invoke -CommandName Invoke-WebRequest -Times 1 -Exactly -ParameterFilter {
+            $Uri -eq "https://example.com/Clicker-Setup-1.3.1.exe"
+        }
     }
 
     It "reports release-check, download, and install milestones via ProgressCallback" {

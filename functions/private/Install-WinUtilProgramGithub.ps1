@@ -21,6 +21,13 @@ Function Install-WinUtilProgramGithub {
         gives a reliable success signal to gate on - installing the redistributable in parallel
         is idempotent and harmless even if the user hasn't finished Clicker's own setup wizard
         yet by the time it runs.
+
+        Asset selection (which release asset actually gets downloaded, when assetPattern matches
+        more than one) is delegated to Select-WinUtilGithubReleaseAsset - see that function's own
+        docstring. Added after Clicker's release started publishing both
+        "Clicker-Setup-<version>.exe" and "Clicker-Setup-<version>-arm64.exe": the previous plain
+        "first match wins" logic isn't architecture-aware at all, and confirmed live to hand a
+        user on ordinary x64 hardware an installer that can't run there.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -69,7 +76,8 @@ Function Install-WinUtilProgramGithub {
             continue
         }
 
-        $asset = $release.assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
+        $matchingAssets = @($release.assets | Where-Object { $_.name -like $assetPattern })
+        $asset = Select-WinUtilGithubReleaseAsset -MatchingAssets $matchingAssets
         if (-not $asset) {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "No asset matching '$assetPattern' found in latest release of $repo"
             continue
