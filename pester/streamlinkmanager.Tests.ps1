@@ -27,7 +27,6 @@ Describe "Install-WinUtilStreamLinkManager" {
         Mock New-Item { }
         Mock Invoke-WebRequest { }
         Mock Test-Path { $true }
-        Mock Set-Content { }
         Mock Remove-Item { }
         Mock Start-Process { }
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "Streaming Library Manager" } }
@@ -108,42 +107,61 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
-    It "runs slm.bat's 'port' command with the requested port piped in via redirected stdin" {
+    It "never runs slm.bat's own 'port' command" {
+        # Regression guard for the actual reported bug: feeding the port into "port"'s
+        # interactive `set /P` prompt via -RedirectStandardInput redirects stdin for the whole
+        # cmd.exe process, not just that one line - and slm.bat later calls
+        # `timeout /NOBREAK /T 5` to wait for its own elevated netsh call, which hard-refuses to
+        # run at all against a non-console stdin. Confirmed live: "ERROR: Input redirection is
+        # not supported, exiting the process immediately." appeared in the install log on every
+        # run, reading as a failure even when the install otherwise succeeded. "port" only has
+        # two persistent effects behind that prompt (setting SLM_PORT and the firewall rule),
+        # both replicated directly instead - see the function's own docstring.
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "7654" })
 
-        Should -Invoke -CommandName Set-Content -Times 1 -Exactly -ParameterFilter { $Value -eq "7654" }
-        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
-            $ArgumentList -contains "port" -and $RedirectStandardInput
+        Should -Invoke -CommandName Start-Process -Times 2 -Exactly -ParameterFilter {
+            $ArgumentList -notcontains "port"
         }
     }
 
+    It "reports the resolved port in the final install message, for a requested port" {
+        $messages = [System.Collections.Generic.List[string]]::new()
+        Mock Write-WinUtilLog { $messages.Add($Message) }
+
+        Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "7654" })
+
+        $messages | Should -Contain "Streaming Library Manager installed - web interface at http://localhost:7654"
+    }
+
     It "defaults to port 5000 when no port is requested" {
+        $messages = [System.Collections.Generic.List[string]]::new()
+        Mock Write-WinUtilLog { $messages.Add($Message) }
+
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
 
-        Should -Invoke -CommandName Set-Content -Times 1 -Exactly -ParameterFilter { $Value -eq "5000" }
+        $messages | Should -Contain "Streaming Library Manager installed - web interface at http://localhost:5000"
     }
 
     It "falls back to the default port and logs a warning for an out-of-range port" {
+        $messages = [System.Collections.Generic.List[string]]::new()
+        Mock Write-WinUtilLog { $messages.Add($Message) } -ParameterFilter { $Level -ne "WARN" }
+        Mock Write-WinUtilLog { } -ParameterFilter { $Level -eq "WARN" }
+
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "99" })
 
-        Should -Invoke -CommandName Set-Content -Times 1 -Exactly -ParameterFilter { $Value -eq "5000" }
+        $messages | Should -Contain "Streaming Library Manager installed - web interface at http://localhost:5000"
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "WARN" -and $Message -like "*isn't a valid port*"
+        }
     }
 
-    It "does not create its own firewall rule when slm.bat's own 'port' command already created one" {
+    It "does not recreate the firewall rule when one already exists from a previous install" {
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
 
         Should -Invoke -CommandName New-NetFirewallRule -Times 0 -Exactly
     }
 
-    It "creates the firewall rule itself as a fallback when slm.bat's own attempt didn't land" {
-        # Regression guard for a real reported bug: slm.bat's own "port" handler calls
-        # `timeout /NOBREAK /T 5` to wait for its elevated netsh call to finish, but timeout.exe
-        # hard-refuses to run at all against the redirected (non-console) stdin this function
-        # uses to feed the port number in - confirmed live via "ERROR: Input redirection is not
-        # supported, exiting the process immediately." in the install log. That skips the
-        # intended wait entirely, so slm.bat can end up deleting its temp netsh script before the
-        # elevated, UAC-gated process has necessarily had a chance to read it - and slm.bat never
-        # checks whether the rule actually got created before printing success regardless.
+    It "creates the scoped firewall rule directly when none exists yet" {
         Mock Get-NetFirewallRule { $null }
 
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "7654" })
@@ -153,14 +171,28 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
-    It "still creates the firewall-scoping 'port' rule even for the default port" {
-        # Regression guard: "port" is the only thing that creates the properly-scoped Windows
-        # Firewall rule - skipping it for the default port would silently leave whatever traffic
-        # rule ends up in place unscoped, the exact problem this rewrite exists to fix.
+    It "logs an error when the firewall rule still doesn't exist after attempting to create it" {
+        Mock Get-NetFirewallRule { $null }
+        Mock New-NetFirewallRule { throw "access denied" }
+        Mock Write-WinUtilLog { }
+
+        { Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage) } | Should -Not -Throw
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "*Failed to create*firewall rule*"
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "*firewall rule still doesn't exist*"
+        }
+    }
+
+    It "still checks for the firewall-scoping rule even for the default port" {
+        # Regression guard: skipping this for the default port would silently leave whatever
+        # rule (if any) ends up in place unscoped - the exact problem this rewrite exists to fix.
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
 
-        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
-            $ArgumentList -contains "port"
+        Should -Invoke -CommandName Get-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
+            $DisplayName -eq "Streaming Library Manager"
         }
     }
 
@@ -234,7 +266,7 @@ Describe "Uninstall-WinUtilStreamLinkManager" {
         }
     }
 
-    It "removes the Windows Firewall rule slm.bat's own 'port' command created" {
+    It "removes the Windows Firewall rule created for the app's port" {
         # Regression guard for the author-confirmed gap in the previous version: it never
         # removed this rule at all.
         Uninstall-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
