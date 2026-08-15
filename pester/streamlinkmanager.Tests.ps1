@@ -9,6 +9,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Uninstall-WinUtilStreamLinkManager.ps1")
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
+    function Optimize-WinUtilSlmBat { param($Path) }
 
     $script:installDir = Join-Path $env:LocalAppData "StreamingLibraryManager"
     $script:batPath = Join-Path $script:installDir "slm.bat"
@@ -26,7 +27,9 @@ Describe "Install-WinUtilStreamLinkManager" {
     BeforeEach {
         Mock New-Item { }
         Mock Invoke-WebRequest { }
+        Mock Optimize-WinUtilSlmBat { $true }
         Mock Test-Path { $true }
+        Mock Set-Content { }
         Mock Remove-Item { }
         Mock Start-Process { }
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "Streaming Library Manager" } }
@@ -107,20 +110,25 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
-    It "never runs slm.bat's own 'port' command" {
-        # Regression guard for the actual reported bug: feeding the port into "port"'s
-        # interactive `set /P` prompt via -RedirectStandardInput redirects stdin for the whole
-        # cmd.exe process, not just that one line - and slm.bat later calls
-        # `timeout /NOBREAK /T 5` to wait for its own elevated netsh call, which hard-refuses to
-        # run at all against a non-console stdin. Confirmed live: "ERROR: Input redirection is
-        # not supported, exiting the process immediately." appeared in the install log on every
-        # run, reading as a failure even when the install otherwise succeeded. "port" only has
-        # two persistent effects behind that prompt (setting SLM_PORT and the firewall rule),
-        # both replicated directly instead - see the function's own docstring.
+    It "patches slm.bat for speed/reliability right after downloading it, before running anything" {
+        Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
+
+        Should -Invoke -CommandName Optimize-WinUtilSlmBat -Times 1 -Exactly -ParameterFilter { $Path -eq $script:batPath }
+    }
+
+    It "runs slm.bat's 'port' command with the requested port piped in via redirected stdin" {
+        # Calling "port" itself (rather than replicating its two effects directly) keeps this on
+        # the same footing as "upgrade"/"startup": tracking upstream's own current logic instead
+        # of a second copy of it. Safe to feed via redirected stdin because Optimize-WinUtilSlmBat
+        # already patched slm.bat's own `timeout /NOBREAK /T 5` (which used to hard-fail against
+        # a non-console stdin - confirmed live via "ERROR: Input redirection is not supported,
+        # exiting the process immediately." in the install log) into something that doesn't
+        # touch stdin at all.
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "7654" })
 
-        Should -Invoke -CommandName Start-Process -Times 2 -Exactly -ParameterFilter {
-            $ArgumentList -notcontains "port"
+        Should -Invoke -CommandName Set-Content -Times 1 -Exactly -ParameterFilter { $Value -eq "7654" }
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList -contains "port" -and $RedirectStandardInput
         }
     }
 

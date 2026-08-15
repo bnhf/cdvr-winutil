@@ -30,7 +30,11 @@ Function Install-WinUtilStreamLinkManager {
         slm.bat is downloaded fresh into the install directory on every run, not bundled or
         cached - it is a small, frequently-updated launcher script, and downloading it fresh
         means this always runs upstream's current install/upgrade/port/startup logic exactly,
-        with nothing here to fall out of sync as that script changes.
+        with nothing here to fall out of sync as that script changes. Immediately after
+        downloading it, Optimize-WinUtilSlmBat patches its own download/extract/wait commands in
+        place for speed and to work correctly under a redirected stdin - see that function's own
+        docstring for exactly what and why. That patch is applied once, before any of the three
+        invocations below, since all three run the same downloaded file.
 
         Routed through cmd.exe explicitly (Start-Process -FilePath cmd.exe -ArgumentList "/c",
         $batPath, ...), not Start-Process -FilePath $batPath directly - the same reasoning as
@@ -40,39 +44,27 @@ Function Install-WinUtilStreamLinkManager {
         Windows to figure out how to run it.
 
         Port selection (catalog "prompts": SLM_PORT, an optional text field - blank keeps the
-        default 5000) does NOT run slm.bat's own "port" command - it sets SLM_PORT and creates
-        the scoped Windows Firewall rule directly instead. An earlier version of this function
-        did call "port", feeding the chosen value into its interactive `set /P` prompt via
-        Start-Process -RedirectStandardInput. That worked for the prompt itself, but confirmed
-        live to have a side effect slm.bat's own "port" handler doesn't expect: redirecting
-        stdin lasts for the cmd.exe process's whole lifetime, not just that one line, and
-        slm.bat later calls `timeout /NOBREAK /T 5` to wait for the elevated netsh call it just
-        kicked off (via its own -Verb RunAs) to finish. timeout.exe hard-refuses to run at all
-        against a non-console stdin ("Input redirection is not supported, exiting the process
-        immediately") and exits instantly instead of actually waiting - a real, user-visible
-        error line that reads as something having failed even on a run where it hadn't, since
-        slm.bat still prints "has been opened" unconditionally regardless of what actually
-        happened. Confirmed live both ways: sometimes WinUtil's own already-elevated process
-        means -Verb RunAs completes near-instantly with nothing to wait on and the rule survives
-        anyway; other times it genuinely loses the race and the rule never gets created at all.
+        default 5000) is fed into slm.bat's own "port" command via -RedirectStandardInput from a
+        small temp file, answering its interactive `set /P` prompt non-interactively. Confirmed
+        live this used to have a real side effect: redirecting stdin lasts for the cmd.exe
+        process's whole lifetime, not just that one line, and slm.bat later calls
+        `timeout /NOBREAK /T 5` to wait for the elevated netsh call it just kicked off (via its
+        own -Verb RunAs) to finish - timeout.exe hard-refuses to run at all against a non-console
+        stdin, printing a real, user-visible error and exiting instantly instead of actually
+        waiting, while slm.bat still prints "has been opened" unconditionally regardless of what
+        actually happened. Fixed at the source by Optimize-WinUtilSlmBat, which replaces every
+        `timeout /NOBREAK /T 5` in the downloaded file with a wait that doesn't care about stdin
+        at all - not by avoiding "port" or reimplementing what it does. Calling "port" itself,
+        rather than replicating its two persistent effects (setx SLM_PORT and the netsh firewall
+        rule) directly, keeps this on the same footing as "upgrade" and "startup": tracking
+        upstream's own current logic for that command, not a second copy of it that could drift.
 
-        Reading slm.bat's own source, "port" only has two persistent effects behind that prompt:
-        `setx SLM_PORT <value>` and the netsh firewall rule - everything else is input
-        validation (already done above, before this ever runs) and an informational netstat
-        check that means nothing at install time, before the app has even started once with the
-        new port. Both effects are simple, stable, and exactly known, so this replicates them
-        directly - [Environment]::SetEnvironmentVariable(..., "User") is the same persistence
-        setx uses under the hood - rather than routing them through an interactive command whose
-        only way to script it introduces a worse problem than the one it's scripting around.
-        This is a narrow exception to the broader reason this function wraps slm.bat instead of
-        reimplementing it (see above): the earlier reimplementation's real sin was drifting from
-        upstream's own download/extract/data-preservation logic, not from replicating two
-        one-line, unlikely-to-change side effects of a prompt that cannot be scripted cleanly.
-
-        The firewall rule is still verified afterward, not just created and trusted - New-
-        NetFirewallRule's own result is checked too, not fired and forgotten, since a silently
-        swallowed failure there would leave the port unreachable with nothing in the log to
-        explain why.
+        The firewall rule is still verified afterward, not just trusted from slm.bat's own
+        output - if it's still missing (the timeout.exe race is fixed, but nothing guarantees an
+        elevated, UAC-gated background process finishes in any particular window), this creates
+        it directly as a fallback, and that fallback's own result is checked too, not fired and
+        forgotten, since a silently swallowed failure there would leave the port unreachable with
+        nothing in the log to explain why.
 
         "startup" registers slm.bat's own scheduled task, which - per its own source - always
         runs at RunLevel highest (elevated), self-elevating via -Verb RunAs just to register it.
@@ -134,11 +126,13 @@ Function Install-WinUtilStreamLinkManager {
         Write-WinUtilLog -Component "Package" -Message "Installing $name to $installDir"
         if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
 
+        $portInputFile = $null
         try {
             New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Downloading slm.bat"
             Invoke-WebRequest -Uri $batUrl -OutFile $batPath -UseBasicParsing -TimeoutSec 60
+            Optimize-WinUtilSlmBat -Path $batPath | Out-Null
 
             $upgradeArgs = @("/c", $batPath, "upgrade")
             if ($prerelease) { $upgradeArgs += "prerelease" }
@@ -153,7 +147,9 @@ Function Install-WinUtilStreamLinkManager {
 
             Write-WinUtilLog -Component "Package" -Message "Setting $name's port to $port"
             if ($ProgressCallback) { try { & $ProgressCallback "Configuring $name's port..." } catch {} }
-            [Environment]::SetEnvironmentVariable("SLM_PORT", $port, "User")
+            $portInputFile = Join-Path $env:TEMP "slm-port-input-$([guid]::NewGuid().ToString('N')).txt"
+            Set-Content -Path $portInputFile -Value $port -Encoding ASCII
+            Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath, "port") -NoNewWindow -Wait -RedirectStandardInput $portInputFile
 
             if (-not (Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue)) {
                 try {
@@ -181,6 +177,8 @@ Function Install-WinUtilStreamLinkManager {
             Write-WinUtilLog -Component "Package" -Message "$name installed - web interface at http://localhost:$port"
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install ${name}: $_"
+        } finally {
+            if ($portInputFile) { Remove-Item $portInputFile -Force -ErrorAction SilentlyContinue }
         }
     }
 }

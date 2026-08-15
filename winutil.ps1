@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.15.1352
+    Version        : v2026.08.15.1411
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.15.1352"
+$sync.version = "v2026.08.15.1411"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2402,7 +2402,11 @@ Function Install-WinUtilStreamLinkManager {
         slm.bat is downloaded fresh into the install directory on every run, not bundled or
         cached - it is a small, frequently-updated launcher script, and downloading it fresh
         means this always runs upstream's current install/upgrade/port/startup logic exactly,
-        with nothing here to fall out of sync as that script changes.
+        with nothing here to fall out of sync as that script changes. Immediately after
+        downloading it, Optimize-WinUtilSlmBat patches its own download/extract/wait commands in
+        place for speed and to work correctly under a redirected stdin - see that function's own
+        docstring for exactly what and why. That patch is applied once, before any of the three
+        invocations below, since all three run the same downloaded file.
 
         Routed through cmd.exe explicitly (Start-Process -FilePath cmd.exe -ArgumentList "/c",
         $batPath, ...), not Start-Process -FilePath $batPath directly - the same reasoning as
@@ -2412,39 +2416,27 @@ Function Install-WinUtilStreamLinkManager {
         Windows to figure out how to run it.
 
         Port selection (catalog "prompts": SLM_PORT, an optional text field - blank keeps the
-        default 5000) does NOT run slm.bat's own "port" command - it sets SLM_PORT and creates
-        the scoped Windows Firewall rule directly instead. An earlier version of this function
-        did call "port", feeding the chosen value into its interactive `set /P` prompt via
-        Start-Process -RedirectStandardInput. That worked for the prompt itself, but confirmed
-        live to have a side effect slm.bat's own "port" handler doesn't expect: redirecting
-        stdin lasts for the cmd.exe process's whole lifetime, not just that one line, and
-        slm.bat later calls `timeout /NOBREAK /T 5` to wait for the elevated netsh call it just
-        kicked off (via its own -Verb RunAs) to finish. timeout.exe hard-refuses to run at all
-        against a non-console stdin ("Input redirection is not supported, exiting the process
-        immediately") and exits instantly instead of actually waiting - a real, user-visible
-        error line that reads as something having failed even on a run where it hadn't, since
-        slm.bat still prints "has been opened" unconditionally regardless of what actually
-        happened. Confirmed live both ways: sometimes WinUtil's own already-elevated process
-        means -Verb RunAs completes near-instantly with nothing to wait on and the rule survives
-        anyway; other times it genuinely loses the race and the rule never gets created at all.
+        default 5000) is fed into slm.bat's own "port" command via -RedirectStandardInput from a
+        small temp file, answering its interactive `set /P` prompt non-interactively. Confirmed
+        live this used to have a real side effect: redirecting stdin lasts for the cmd.exe
+        process's whole lifetime, not just that one line, and slm.bat later calls
+        `timeout /NOBREAK /T 5` to wait for the elevated netsh call it just kicked off (via its
+        own -Verb RunAs) to finish - timeout.exe hard-refuses to run at all against a non-console
+        stdin, printing a real, user-visible error and exiting instantly instead of actually
+        waiting, while slm.bat still prints "has been opened" unconditionally regardless of what
+        actually happened. Fixed at the source by Optimize-WinUtilSlmBat, which replaces every
+        `timeout /NOBREAK /T 5` in the downloaded file with a wait that doesn't care about stdin
+        at all - not by avoiding "port" or reimplementing what it does. Calling "port" itself,
+        rather than replicating its two persistent effects (setx SLM_PORT and the netsh firewall
+        rule) directly, keeps this on the same footing as "upgrade" and "startup": tracking
+        upstream's own current logic for that command, not a second copy of it that could drift.
 
-        Reading slm.bat's own source, "port" only has two persistent effects behind that prompt:
-        `setx SLM_PORT <value>` and the netsh firewall rule - everything else is input
-        validation (already done above, before this ever runs) and an informational netstat
-        check that means nothing at install time, before the app has even started once with the
-        new port. Both effects are simple, stable, and exactly known, so this replicates them
-        directly - [Environment]::SetEnvironmentVariable(..., "User") is the same persistence
-        setx uses under the hood - rather than routing them through an interactive command whose
-        only way to script it introduces a worse problem than the one it's scripting around.
-        This is a narrow exception to the broader reason this function wraps slm.bat instead of
-        reimplementing it (see above): the earlier reimplementation's real sin was drifting from
-        upstream's own download/extract/data-preservation logic, not from replicating two
-        one-line, unlikely-to-change side effects of a prompt that cannot be scripted cleanly.
-
-        The firewall rule is still verified afterward, not just created and trusted - New-
-        NetFirewallRule's own result is checked too, not fired and forgotten, since a silently
-        swallowed failure there would leave the port unreachable with nothing in the log to
-        explain why.
+        The firewall rule is still verified afterward, not just trusted from slm.bat's own
+        output - if it's still missing (the timeout.exe race is fixed, but nothing guarantees an
+        elevated, UAC-gated background process finishes in any particular window), this creates
+        it directly as a fallback, and that fallback's own result is checked too, not fired and
+        forgotten, since a silently swallowed failure there would leave the port unreachable with
+        nothing in the log to explain why.
 
         "startup" registers slm.bat's own scheduled task, which - per its own source - always
         runs at RunLevel highest (elevated), self-elevating via -Verb RunAs just to register it.
@@ -2506,11 +2498,13 @@ Function Install-WinUtilStreamLinkManager {
         Write-WinUtilLog -Component "Package" -Message "Installing $name to $installDir"
         if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
 
+        $portInputFile = $null
         try {
             New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
             Write-WinUtilLog -Component "Package" -Message "Downloading slm.bat"
             Invoke-WebRequest -Uri $batUrl -OutFile $batPath -UseBasicParsing -TimeoutSec 60
+            Optimize-WinUtilSlmBat -Path $batPath | Out-Null
 
             $upgradeArgs = @("/c", $batPath, "upgrade")
             if ($prerelease) { $upgradeArgs += "prerelease" }
@@ -2525,7 +2519,9 @@ Function Install-WinUtilStreamLinkManager {
 
             Write-WinUtilLog -Component "Package" -Message "Setting $name's port to $port"
             if ($ProgressCallback) { try { & $ProgressCallback "Configuring $name's port..." } catch {} }
-            [Environment]::SetEnvironmentVariable("SLM_PORT", $port, "User")
+            $portInputFile = Join-Path $env:TEMP "slm-port-input-$([guid]::NewGuid().ToString('N')).txt"
+            Set-Content -Path $portInputFile -Value $port -Encoding ASCII
+            Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath, "port") -NoNewWindow -Wait -RedirectStandardInput $portInputFile
 
             if (-not (Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue)) {
                 try {
@@ -2553,6 +2549,8 @@ Function Install-WinUtilStreamLinkManager {
             Write-WinUtilLog -Component "Package" -Message "$name installed - web interface at http://localhost:$port"
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install ${name}: $_"
+        } finally {
+            if ($portInputFile) { Remove-Item $portInputFile -Force -ErrorAction SilentlyContinue }
         }
     }
 }
@@ -5672,6 +5670,85 @@ function Open-WinUtilLink {
             Start-Process -FilePath $Target
         }
     } | Out-Null
+}
+
+function Optimize-WinUtilSlmBat {
+    <#
+    .SYNOPSIS
+        Patches slm.bat's own download, extraction, and wait commands after it's downloaded but
+        before it's run - faster, and safe to run non-interactively.
+
+    .DESCRIPTION
+        Three narrow, mechanical text substitutions on slm.bat's own downloaded file content -
+        not a reimplementation of its download/extract/port logic, just changing how three of
+        its own commands run, not what they do or produce. Plain String.Replace (literal
+        substring matching), not the -replace operator, so neither the search text nor the
+        replacement text needs regex escaping. If upstream ever changes any of this exact
+        wording, that one substitution silently does nothing rather than breaking anything -
+        slm.bat runs with its own (slower, or stdin-fragile) original command instead.
+
+        Confirmed live: a single "slm.bat upgrade" run took over 5 minutes end to end, almost
+        entirely in two of its own steps, both well-known PowerShell 5.1 anti-patterns already
+        fixed elsewhere in this project's own code:
+          - Its download step runs `Invoke-WebRequest -Uri '%link%' -OutFile '%outfile%'` with no
+            $ProgressPreference set - Invoke-WebRequest's default live progress-bar rendering
+            redraws on every buffer chunk and can slow a download by 10-100x, worst on Windows
+            PowerShell 5.1 (which is what slm.bat invokes via plain "powershell").
+          - Its extraction step runs `Expand-Archive`, well known to be dramatically slower than
+            [System.IO.Compression.ZipFile]::ExtractToDirectory() for archives with many files -
+            this release has around 3000. ExtractToDirectory's destination ('slm') is a relative
+            path, matching Expand-Archive's own default (a folder named after the zip, in the
+            current directory) - both processes inherit slm.bat's own working directory, fixed
+            at the top of its script (cd /d "%~dp0") to the folder slm.bat itself runs from.
+
+        Also confirmed live: `timeout /NOBREAK /T 5` - used throughout slm.bat to pace itself
+        after starting a background/elevated step - hard-refuses to run at all when its stdin
+        isn't a real console ("ERROR: Input redirection is not supported, exiting the process
+        immediately"), which Install-WinUtilStreamLinkManager.ps1 needs to be for slm.bat's own
+        "port" command, to feed its interactive `set /P` prompt a value non-interactively. Every
+        occurrence is replaced with `ping -n 6 127.0.0.1 >nul` - the standard batch-scripting
+        substitute for "wait 5 seconds" that doesn't touch stdin or need a console at all (six
+        pings at the default one-second interval, the first sent immediately). Applied file-wide
+        rather than only where it's currently needed, since any future caller redirecting stdin
+        into any other slm.bat command would hit the exact same failure otherwise.
+
+        Best-effort: failing to patch (or the text not matching) is logged and the caller
+        proceeds with the unpatched file - a slower or more fragile install is not a reason to
+        fail one outright.
+
+    .OUTPUTS
+        $true if the file was changed by at least one substitution, $false if none of the
+        expected text was found, or reading/writing the file failed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $original = Get-Content -Path $Path -Raw
+
+        $searchDownload = "Invoke-WebRequest -Uri '%link%' -OutFile '%outfile%'"
+        $replaceDownload = '$ProgressPreference = ''SilentlyContinue''; Invoke-WebRequest -Uri ''%link%'' -OutFile ''%outfile%'''
+        $searchExtract = "Expand-Archive -LiteralPath .\%outfile%"
+        $replaceExtract = 'Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(''%outfile%'', ''slm'')'
+        $searchWait = "timeout /NOBREAK /T 5"
+        $replaceWait = "ping -n 6 127.0.0.1 >nul"
+
+        $patched = $original.Replace($searchDownload, $replaceDownload).Replace($searchExtract, $replaceExtract).Replace($searchWait, $replaceWait)
+
+        if ($patched -eq $original) {
+            Write-WinUtilLog -Level "WARN" -Component "Package" -Message "slm.bat's download/extract/wait commands didn't match the expected text - upstream may have changed it. Continuing with its own (slower, and possibly stdin-fragile) defaults."
+            return $false
+        }
+
+        Set-Content -Path $Path -Value $patched -Encoding ASCII
+        Write-WinUtilLog -Component "Package" -Message "Patched slm.bat: faster download/extract, and waits that work with a non-interactive stdin."
+        return $true
+    } catch {
+        Write-WinUtilLog -Level "WARN" -Component "Package" -Message "Could not patch slm.bat for speed/reliability - continuing with its own defaults: $_"
+        return $false
+    }
 }
 
 function Remove-WinUtilAPPX {
