@@ -286,13 +286,20 @@ Describe "Olivetin application config" {
 
     It "only stops olivetin-ezstart after confirming the olivetin container is running" {
         $command = $script:olivetin.command
-        $command | Should -Match "docker stop olivetin-ezstart"
+        $command | Should -Match "docker stop -t 30 olivetin-ezstart"
         $command | Should -Match "status=running"
 
         $lines = $command -split "`n"
         $checkLine = (0..($lines.Count - 1) | Where-Object { $lines[$_] -match "docker ps -q" } | Select-Object -First 1)
-        $stopLine = (0..($lines.Count - 1) | Where-Object { $lines[$_] -match "docker stop olivetin-ezstart" } | Select-Object -First 1)
+        $stopLine = (0..($lines.Count - 1) | Where-Object { $lines[$_] -match "docker stop -t 30 olivetin-ezstart" } | Select-Object -First 1)
         $stopLine | Should -BeGreaterThan $checkLine
+    }
+
+    It "gives olivetin-ezstart a longer grace period before force-killing it" {
+        # Regression guard: a plain "docker stop" only waits Docker's default 10-second grace
+        # period before escalating to SIGKILL (exit code 137, confirmed live in Portainer) - -t 30
+        # gives the bootstrap container more time to exit on its own first.
+        $script:olivetin.command | Should -Match "docker stop -t 30"
     }
 
     It "removes the olivetin/portainer containers, their images, and the portainer_data volume on uninstall" {
