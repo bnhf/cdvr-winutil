@@ -55,12 +55,12 @@
         "category": "Foundational",
         "choco": "docker-desktop",
         "content": "Docker Desktop",
-        "description": "Docker Desktop is required to run several Channels DVR ecosystem add-ons, including Olivetin (EZ-Start). Opens automatically after installing, since the Docker engine doesn't actually start until you launch it at least once.",
+        "description": "Docker Desktop is required to run several Channels DVR ecosystem add-ons, including Olivetin (EZ-Start). Opens automatically after installing, since the Docker engine doesn't actually start until you launch it at least once - also sets it to start at login, skip opening the Dashboard on startup, and integrate with the default WSL distro.",
         "link": "https://www.docker.com/products/docker-desktop/",
         "handle": "Docker, Inc.",
         "winget": "Docker.DockerDesktop",
         "requires": ["wsl2", "debian"],
-        "postInstallCommand": "$dockerExe = Join-Path $env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; if (Test-Path $dockerExe) { Start-Process $dockerExe } else { Write-WinUtilLog -Level 'WARN' -Component 'Package' -Message 'Docker Desktop executable not found at the expected location - launch it manually from the Start Menu.' }",
+        "postInstallCommand": "$dockerExe = Join-Path $env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; if (Test-Path $dockerExe) { Start-Process $dockerExe; Set-WinUtilDockerDesktopPreferences -DockerExePath $dockerExe } else { Write-WinUtilLog -Level 'WARN' -Component 'Package' -Message 'Docker Desktop executable not found at the expected location - launch it manually from the Start Menu.' }",
         "foss": false
     },
     "nodejs": {
