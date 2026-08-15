@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.15.0819
+    Version        : v2026.08.15.1256
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.15.0819"
+$sync.version = "v2026.08.15.1256"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2373,34 +2373,78 @@ Function Install-WinUtilProgramWinget {
 Function Install-WinUtilStreamLinkManager {
     <#
     .SYNOPSIS
-        Installs Streaming Library Manager natively, without running the upstream slm.bat
-        installer.
+        Installs Streaming Library Manager by downloading and running the upstream slm.bat
+        launcher directly, rather than reimplementing its install/upgrade/port/startup steps.
 
     .DESCRIPTION
-        slm.bat's own "install" command requires an interactive Y/N keypress via the batch
-        "choice" builtin, with no documented silent flag - not automatable without piping
-        input past the prompt as a workaround. Instead, this replicates slm.bat's underlying
-        steps directly (per its source at .../executables/slm.bat): download the same packaged
-        Windows release, extract it into a fixed install directory, then register and start it,
-        rather than relying on the batch script at all.
+        An earlier version of this function reimplemented slm.bat's download-and-extract steps
+        natively, specifically to avoid its interactive Y/N "install" prompt. Author-confirmed
+        (babsonnexus, reviewing that approach): reimplementing it created a real, growing feature
+        gap instead of avoiding a small one. Concretely, that version: had no port selection (and
+        so never set SLM_PORT, and so never created the properly-scoped Windows Firewall rule
+        slm.bat's own "port" command creates - whatever ended up allowing traffic through was a
+        broad, unscoped, per-app rule instead), named the install folder "StreamLinkManager"
+        instead of "StreamingLibraryManager", had no way to choose the prerelease build, and -
+        confirmed as an actual bug, not just a missing feature - launched the app in a visible
+        foreground window instead of hidden/background, because
+        Start-WinUtilProcessAsStandardUserNoWait has no window-style control at all. This version
+        wraps slm.bat itself, so all of that tracks upstream directly instead of drifting.
 
-        The download itself is a Dropbox link hardcoded in slm.bat - there's no GitHub release
-        asset for this app - so this has a real, if unavoidable, dependency on a link the
-        project maintainer controls rather than a versioned GitHub artifact.
+        Uses "upgrade", never "install" - confirmed via slm.bat's own source
+        (.../executables/slm.bat): "install" shows an interactive Y/N confirmation via the
+        `choice` builtin with no scriptable bypass, while "upgrade" has no prompt at all and,
+        per the author's own testing of this rewrite, correctly preserves the existing
+        installation's program files across a reinstall - "install" does not; it wipes them,
+        with only an on-screen warning. On a completely fresh install "upgrade" behaves
+        identically to "install" anyway (there is nothing yet to preserve), so there is no
+        reason to ever use "install" here.
 
-        No uninstall is documented upstream either. Because this owns the entire install
-        location, Uninstall-WinUtilStreamLinkManager can safely remove it outright: stop the
-        process, unregister the scheduled task, delete the install directory.
+        slm.bat is downloaded fresh into the install directory on every run, not bundled or
+        cached - it is a small, frequently-updated launcher script, and downloading it fresh
+        means this always runs upstream's current install/upgrade/port/startup logic exactly,
+        with nothing here to fall out of sync as that script changes.
 
-        Both the initial launch and the at-logon scheduled task run de-elevated (standard user),
-        not inheriting WinUtil's own elevated context - see the inline comment above the
-        schtasks call for why, despite slm.bat's own script using an elevated RunLevel.
+        Routed through cmd.exe explicitly (Start-Process -FilePath cmd.exe -ArgumentList "/c",
+        $batPath, ...), not Start-Process -FilePath $batPath directly - the same reasoning as
+        Install-WinUtilProgramNpm's npm.cmd handling: -NoNewWindow forces UseShellExecute to
+        $false, which does a literal CreateProcess-style launch with no .bat file-association
+        resolution, so slm.bat has to be handed to cmd.exe explicitly rather than relying on
+        Windows to figure out how to run it.
+
+        Port selection (catalog "prompts": SLM_PORT, an optional text field - blank keeps the
+        default 5000) is fed into slm.bat's own "port" command via -RedirectStandardInput from a
+        small temp file, not a piped string - `set /P` reading from a redirected input FILE is a
+        standard, reliable way to script an interactive prompt like this; feeding it through
+        PowerShell's own pipeline into an external process has known quirks Start-Process's
+        stdin redirection avoids entirely. Run unconditionally, even for the default port 5000,
+        because "port" is also the ONLY thing that creates the properly-scoped Windows Firewall
+        rule (scoped to exactly that TCP port) - skipping it for the default port would silently
+        reproduce the too-broad-firewall problem this rewrite exists to fix. Not verified live in
+        this environment (no real Windows install of this app was run here) - reasoned from
+        slm.bat's own source rather than confirmed end to end.
+
+        "startup" registers slm.bat's own scheduled task, which - per its own source - always
+        runs at RunLevel highest (elevated), self-elevating via -Verb RunAs just to register it.
+        Left as-is here rather than overridden to run de-elevated, which is what the previous
+        version of this function did. That is a deliberate divergence from how WinUtil de-elevates
+        its own installer launches elsewhere: the whole point of wrapping slm.bat directly is to
+        defer to its own author's choices instead of second-guessing them from outside. Both
+        "port" and "startup" may trigger their own UAC prompts as a result (slm.bat's own -Verb
+        RunAs calls, not something this function controls) - expected, not a bug to route around.
+
+        The initial "start now" launch runs through that same scheduled task
+        (Start-ScheduledTask), not a second, separate launch of slm.exe - per the author's
+        feedback on the previous version, its separate launch path
+        (Start-WinUtilProcessAsStandardUserNoWait, which has no window-style control at all) is
+        exactly what put the app in a visible foreground window instead of the hidden background
+        one the scheduled task is already configured to produce.
+
+        Known limitation: the catalog's "webui" field (the popup's "Open" button target) is a
+        fixed "http://localhost:5000" - it does not update if SLM_PORT is set to something else
+        here. Nothing currently threads an install-time value back into that static field.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
-        function's docstring for why it exists. Particularly relevant here: confirmed live, this
-        specific install (a single Dropbox download + extract, no per-step feedback beyond log
-        lines) was reported as looking frozen - the progress bar showed up blank and never moved
-        until the whole thing finished.
+        function's docstring for why it exists.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -2409,8 +2453,7 @@ Function Install-WinUtilStreamLinkManager {
         [scriptblock]$ProgressCallback
     )
 
-    # Same link slm.bat itself downloads from for a normal (non-prerelease) install.
-    $downloadUrl = "https://www.dropbox.com/scl/fi/apw33xi80jjivyjp9rxb4/slm_windows.zip?rlkey=1m5zj7qz9ittguispsi00nyar&dl=1"
+    $batUrl = "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/executables/slm.bat"
     $taskName = "Streaming Library Manager"
 
     # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
@@ -2421,63 +2464,65 @@ Function Install-WinUtilStreamLinkManager {
 
     foreach ($package in $Packages) {
         $name = $package.content
-        $installDir = Join-Path $env:LocalAppData "StreamLinkManager"
-        $zipPath = Join-Path $env:TEMP "slm_windows_$([guid]::NewGuid().ToString('N')).zip"
-        $extractPath = Join-Path $env:TEMP "slm_windows_extract_$([guid]::NewGuid().ToString('N'))"
+        $installDir = Join-Path $env:LocalAppData "StreamingLibraryManager"
+        $batPath = Join-Path $installDir "slm.bat"
+
+        $port = "5000"
+        if ($package.PromptValues -and -not [string]::IsNullOrWhiteSpace($package.PromptValues["SLM_PORT"])) {
+            $requested = $package.PromptValues["SLM_PORT"].Trim()
+            if ($requested -match '^\d+$' -and [int]$requested -ge 1000 -and [int]$requested -le 9999) {
+                $port = $requested
+            } else {
+                Write-WinUtilLog -Level "WARN" -Component "Package" -Message "${name}: '$requested' isn't a valid port (1000-9999) - using the default 5000."
+            }
+        }
+
+        $prerelease = $package.PromptValues -and ($package.PromptValues["SLM_PRERELEASE"] -imatch '^y(es)?$')
 
         Write-WinUtilLog -Component "Package" -Message "Installing $name to $installDir"
         if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
+
+        $portInputFile = $null
         try {
-            # Stop any running instance first so its files aren't locked during overwrite -
-            # slm.bat does the same before it re-extracts over an existing install.
-            Get-Process -Name "slm" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
-            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+            Write-WinUtilLog -Component "Package" -Message "Downloading slm.bat"
+            Invoke-WebRequest -Uri $batUrl -OutFile $batPath -UseBasicParsing -TimeoutSec 60
 
-            Write-WinUtilLog -Component "Package" -Message "Downloading $name"
-            if ($ProgressCallback) { try { & $ProgressCallback "Downloading $name..." } catch {} }
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
-
-            Write-WinUtilLog -Component "Package" -Message "Extracting $name"
-            if ($ProgressCallback) { try { & $ProgressCallback "Extracting $name..." } catch {} }
-            Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
-
-            if (-not (Test-Path $installDir)) {
-                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-            }
-            Copy-Item -Path (Join-Path $extractPath '*') -Destination $installDir -Recurse -Force
+            $upgradeArgs = @("/c", $batPath, "upgrade")
+            if ($prerelease) { $upgradeArgs += "prerelease" }
+            Write-WinUtilLog -Component "Package" -Message "Running slm.bat $($upgradeArgs[2..($upgradeArgs.Count - 1)] -join ' ')"
+            if ($ProgressCallback) { try { & $ProgressCallback "Downloading and extracting $name..." } catch {} }
+            Start-Process -FilePath "cmd.exe" -ArgumentList $upgradeArgs -NoNewWindow -Wait
 
             $exePath = Join-Path $installDir "slm.exe"
             if (-not (Test-Path $exePath)) {
-                throw "slm.exe not found in the extracted package - the upstream release layout may have changed."
+                throw "slm.exe not found after running slm.bat upgrade - the upstream release layout may have changed."
             }
 
-            # Register it to start at logon. slm.bat's own "startup" command uses schtasks
-            # .../rl highest (elevated) - but per its own source, the ONLY thing that actually
-            # needs elevation is the separate, independently-self-elevating (-Verb RunAs) "port"
-            # command that opens a Windows Firewall rule; the app's core job (organizing local
-            # media library data, serving a local web UI) needs no admin rights at all. Running
-            # a background tray app elevated at every login, indefinitely, for no functional
-            # reason is exactly the kind of unnecessary-elevation problem WinUtil should avoid
-            # introducing on its own users' behalf, even though upstream's own script does it -
-            # /rl limited here instead, matching the same de-elevated RunLevel
-            # Start-WinUtilProcessAsStandardUserNoWait already uses for install-time launches.
-            $runCommand = "powershell -NoProfile -WindowStyle Hidden -Command `"Start-Process -WindowStyle Hidden '$exePath'`""
-            & schtasks /create /tn $taskName /tr $runCommand /sc onlogon /rl limited /f | Out-Null
+            Write-WinUtilLog -Component "Package" -Message "Setting $name's port to $port"
+            if ($ProgressCallback) { try { & $ProgressCallback "Configuring $name's port..." } catch {} }
+            $portInputFile = Join-Path $env:TEMP "slm-port-input-$([guid]::NewGuid().ToString('N')).txt"
+            Set-Content -Path $portInputFile -Value $port -Encoding ASCII
+            Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath, "port") -NoNewWindow -Wait -RedirectStandardInput $portInputFile
 
-            Write-WinUtilLog -Component "Package" -Message "Starting $name"
-            if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
-            # De-elevated for the same reason as the scheduled task above - see that comment.
-            if (-not (Start-WinUtilProcessAsStandardUserNoWait -FilePath $exePath)) {
-                Start-Process -WindowStyle Hidden -FilePath $exePath
+            Write-WinUtilLog -Component "Package" -Message "Registering $name to start at logon"
+            if ($ProgressCallback) { try { & $ProgressCallback "Registering $name to start at logon..." } catch {} }
+            Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath, "startup") -NoNewWindow -Wait
+
+            if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+                Write-WinUtilLog -Component "Package" -Message "Starting $name"
+                if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
+                Start-ScheduledTask -TaskName $taskName
+            } else {
+                Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name's scheduled task wasn't found after 'slm.bat startup' - start it manually from $installDir."
             }
 
-            Write-WinUtilLog -Component "Package" -Message "$name installed and started - web interface at $($package.webui)"
+            Write-WinUtilLog -Component "Package" -Message "$name installed - web interface at http://localhost:$port"
         } catch {
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to install ${name}: $_"
         } finally {
-            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+            if ($portInputFile) { Remove-Item $portInputFile -Force -ErrorAction SilentlyContinue }
         }
     }
 }
@@ -3134,8 +3179,12 @@ Function Invoke-WinUtilCurrentSystem {
                     # Install-WinUtilStreamLinkManager.ps1 always installs to this exact fixed
                     # location (it owns the whole directory, not something the user chooses) -
                     # checking the file directly is more reliable than probing "webui", which
-                    # only proves the app is currently running, not that it's installed.
-                    if (Test-Path (Join-Path $env:LocalAppData "StreamLinkManager\slm.exe")) {
+                    # only proves the app is currently running, not that it's installed. Also
+                    # checks the old "StreamLinkManager" folder name (before it was fixed to
+                    # match the app's actual name) so a pre-rename install still shows as
+                    # installed rather than silently disappearing from this list.
+                    if ((Test-Path (Join-Path $env:LocalAppData "StreamingLibraryManager\slm.exe")) -or
+                        (Test-Path (Join-Path $env:LocalAppData "StreamLinkManager\slm.exe"))) {
                         Write-Output $entry.Key
                     }
                 }
@@ -8280,10 +8329,31 @@ Function Uninstall-WinUtilStreamLinkManager {
         Uninstalls Streaming Library Manager.
 
     .DESCRIPTION
-        No uninstall is documented upstream for slm.bat. Since Install-WinUtilStreamLinkManager
-        owns the entire install location (a fixed folder under LocalAppData, not something the
-        user chose or put other data into), this can safely remove it outright: stop the
-        process, unregister the logon scheduled task, delete the install directory.
+        No "uninstall" handle exists in slm.bat itself - only install/upgrade/startup/port - so
+        this still has to reconstruct the removal steps directly rather than delegating to it.
+
+        Author-confirmed gap in the previous version of this function: it never removed the
+        Windows Firewall rule "port" creates. Fixed here by removing it by its fixed, known
+        DisplayName ("Streaming Library Manager") via Remove-NetFirewallRule -DisplayName - the
+        same NetSecurity module Invoke-WinUtilSSHServer.ps1 already uses elsewhere in this
+        project. slm.bat's own "port" command creates the rule with raw netsh
+        (name="Streaming Library Manager"), not this cmdlet, but netsh and the NetSecurity
+        module both read/write the same underlying Windows Firewall rule store, so a
+        netsh-created rule is fully visible to, and removable by, Remove-NetFirewallRule. Found
+        by name regardless of which port was actually configured, since the rule's name never
+        varies - only its LocalPort does. -DisplayName is used directly rather than looking it
+        up with Get-NetFirewallRule first and piping the result in - Remove-NetFirewallRule's
+        pipeline parameter is strictly typed to a real CimInstance, which doesn't accept a
+        substitute object in a test double the way -DisplayName (a plain string parameter) does.
+
+        Since Install-WinUtilStreamLinkManager owns the entire install location (a fixed folder
+        under LocalAppData that only it writes to), this can safely remove it outright: stop the
+        process, unregister the logon scheduled task, remove the firewall rule, delete the
+        install directory. Also removes "StreamLinkManager" (the previous, incorrectly-named
+        install folder, before this was fixed to match the app's actual name) if still present,
+        so upgrading past that old bug doesn't leave an orphaned copy of the app behind - this is
+        the exact "leftover files after an uninstall" problem this project has been chasing
+        elsewhere, self-inflicted here by an earlier version of this same function.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -8296,19 +8366,28 @@ Function Uninstall-WinUtilStreamLinkManager {
     )
 
     $taskName = "Streaming Library Manager"
+    $firewallRuleName = "Streaming Library Manager"
 
     foreach ($package in $Packages) {
         $name = $package.content
-        $installDir = Join-Path $env:LocalAppData "StreamLinkManager"
+        $installDir = Join-Path $env:LocalAppData "StreamingLibraryManager"
+        $oldInstallDir = Join-Path $env:LocalAppData "StreamLinkManager"
 
         Write-WinUtilLog -Component "Package" -Message "Uninstalling $name"
         if ($ProgressCallback) { try { & $ProgressCallback "Uninstalling $name..." } catch {} }
         try {
             Get-Process -Name "slm" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            & schtasks /delete /tn $taskName /f 2>$null | Out-Null
 
-            if (Test-Path $installDir) {
-                Remove-Item $installDir -Recurse -Force
+            if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+
+            Remove-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
+
+            foreach ($dir in @($installDir, $oldInstallDir)) {
+                if (Test-Path $dir) {
+                    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+                }
             }
 
             Write-WinUtilLog -Component "Package" -Message "$name uninstalled."
@@ -9675,7 +9754,7 @@ function Invoke-WPFInstall {
         # docstring, but capping too early looks the same as not advancing at all).
         $expectedProgressSteps = @{
             WslFeature = 6; WslDistro = 6; WslCommand = 6
-            Direct = 2; Github = 3; Npm = 1; StreamLinkManager = 4
+            Direct = 2; Github = 3; Npm = 1; StreamLinkManager = 5
             Choco = 1
         }
 
@@ -11755,12 +11834,22 @@ $sync.configs.applications = @'
   "WPFInstallstreamlinkmanager": {
     "category": "Channels DVR",
     "content": "Streaming Library Manager",
-    "description": "Organizes movies, TV shows, and linear stations across streaming platforms for Channels DVR and Infuse, by babsonnexus. Installed natively rather than via the upstream slm.bat installer, which needs an interactive keypress to confirm and has no scripted uninstall - this downloads the same packaged release directly and registers it to start at logon.",
+    "description": "Organizes movies, TV shows, and linear stations across streaming platforms for Channels DVR and Infuse, by babsonnexus. Installed by downloading and running the upstream slm.bat launcher directly (its \"upgrade\" command, which needs no interactive confirmation and preserves existing settings), then registering it to start at logon.",
     "link": "https://github.com/babsonnexus/stream-link-manager-for-channels",
     "icon": "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/static/assets/img/slm_navicon.png",
     "webui": "http://localhost:5000",
     "handle": "@babsonnexus",
     "installType": "streamLinkManager",
+    "prompts": [
+      {
+        "name": "SLM_PORT",
+        "label": "Port for its web interface (1000-9999, leave blank for the default 5000)"
+      },
+      {
+        "name": "SLM_PRERELEASE",
+        "label": "Install the prerelease build? (yes/no, default no)"
+      }
+    ],
     "foss": true
   },
   "WPFInstalldvrdesk": {

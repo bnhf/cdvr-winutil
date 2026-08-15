@@ -112,7 +112,7 @@ function Invoke-WPFInstall {
         # docstring, but capping too early looks the same as not advancing at all).
         $expectedProgressSteps = @{
             WslFeature = 6; WslDistro = 6; WslCommand = 6
-            Direct = 2; Github = 3; Npm = 1; StreamLinkManager = 4
+            Direct = 2; Github = 3; Npm = 1; StreamLinkManager = 5
             Choco = 1
         }
 

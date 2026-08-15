@@ -288,15 +288,29 @@ Describe "Invoke-WinUtilCurrentSystem direct/github/wslCommand detection" {
     It "detects a streamLinkManager package via its fixed install path" {
         # Regression guard: Streaming Library Manager installed to a real, fixed location but
         # "Show Installed Apps" never checked for it - this installType had no case at all.
-        Mock Test-Path { $true } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" }
+        Mock Test-Path { $true } -ParameterFilter { $Path -like "*StreamingLibraryManager\slm.exe" }
+        Mock Test-Path { $false } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" -and $Path -notlike "*StreamingLibraryManager*" }
 
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
 
         $result | Should -Contain "WPFInstallstreamlinkmanager"
     }
 
-    It "does not report streamLinkManager as installed when its exe is not present" {
-        Mock Test-Path { $false } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" }
+    It "also detects it under the old, pre-rename 'StreamLinkManager' folder name" {
+        # Regression guard: the install folder was renamed from "StreamLinkManager" to
+        # "StreamingLibraryManager" to match the app's actual name - an install from before that
+        # rename must not silently disappear from this list.
+        Mock Test-Path { $false } -ParameterFilter { $Path -like "*StreamingLibraryManager\slm.exe" }
+        Mock Test-Path { $true } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" -and $Path -notlike "*StreamingLibraryManager*" }
+
+        $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
+
+        $result | Should -Contain "WPFInstallstreamlinkmanager"
+    }
+
+    It "does not report streamLinkManager as installed when neither exe is present" {
+        Mock Test-Path { $false } -ParameterFilter { $Path -like "*StreamingLibraryManager\slm.exe" }
+        Mock Test-Path { $false } -ParameterFilter { $Path -like "*StreamLinkManager\slm.exe" -and $Path -notlike "*StreamingLibraryManager*" }
 
         $result = @(Invoke-WinUtilCurrentSystem -CheckBox "winget")
 

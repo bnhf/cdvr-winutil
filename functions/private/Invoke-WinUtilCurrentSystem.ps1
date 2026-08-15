@@ -129,8 +129,12 @@ Function Invoke-WinUtilCurrentSystem {
                     # Install-WinUtilStreamLinkManager.ps1 always installs to this exact fixed
                     # location (it owns the whole directory, not something the user chooses) -
                     # checking the file directly is more reliable than probing "webui", which
-                    # only proves the app is currently running, not that it's installed.
-                    if (Test-Path (Join-Path $env:LocalAppData "StreamLinkManager\slm.exe")) {
+                    # only proves the app is currently running, not that it's installed. Also
+                    # checks the old "StreamLinkManager" folder name (before it was fixed to
+                    # match the app's actual name) so a pre-rename install still shows as
+                    # installed rather than silently disappearing from this list.
+                    if ((Test-Path (Join-Path $env:LocalAppData "StreamingLibraryManager\slm.exe")) -or
+                        (Test-Path (Join-Path $env:LocalAppData "StreamLinkManager\slm.exe"))) {
                         Write-Output $entry.Key
                     }
                 }
