@@ -47,9 +47,22 @@ Function Install-WinUtilStreamLinkManager {
         stdin redirection avoids entirely. Run unconditionally, even for the default port 5000,
         because "port" is also the ONLY thing that creates the properly-scoped Windows Firewall
         rule (scoped to exactly that TCP port) - skipping it for the default port would silently
-        reproduce the too-broad-firewall problem this rewrite exists to fix. Not verified live in
-        this environment (no real Windows install of this app was run here) - reasoned from
-        slm.bat's own source rather than confirmed end to end.
+        reproduce the too-broad-firewall problem this rewrite exists to fix.
+
+        Confirmed live: -RedirectStandardInput has a side effect slm.bat's own "port" handler
+        doesn't expect - it redirects stdin for the cmd.exe process's whole lifetime, not just
+        the one `set /P` line it's meant for, and slm.bat later calls `timeout /NOBREAK /T 5` to
+        wait for the elevated netsh call it just kicked off (via its own -Verb RunAs) to finish.
+        timeout.exe hard-refuses to run at all against a non-console stdin ("Input redirection is
+        not supported, exiting the process immediately") and exits instantly instead of actually
+        waiting, so slm.bat can end up deleting its temp netsh script before that elevated,
+        UAC-gated process has necessarily had a chance to read it - a real race, not just a log
+        warning, that slm.bat's own code never checks the result of (it prints "has been opened"
+        unconditionally either way). Confirmed live this didn't matter when WinUtil's own already-
+        elevated process meant -Verb RunAs completed near-instantly with nothing to wait on - but
+        that's timing, not a guarantee, so the actual firewall rule is verified independently
+        below rather than trusted from slm.bat's own output, with this function creating it
+        itself as a fallback if slm.bat's attempt didn't land.
 
         "startup" registers slm.bat's own scheduled task, which - per its own source - always
         runs at RunLevel highest (elevated), self-elevating via -Verb RunAs just to register it.
@@ -83,6 +96,7 @@ Function Install-WinUtilStreamLinkManager {
 
     $batUrl = "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/executables/slm.bat"
     $taskName = "Streaming Library Manager"
+    $firewallRuleName = "Streaming Library Manager"
 
     # Invoke-WebRequest's default live progress-bar rendering redraws on every buffer chunk and
     # can slow a large download by 10-100x (well-documented PowerShell behavior, worst on
@@ -133,6 +147,11 @@ Function Install-WinUtilStreamLinkManager {
             $portInputFile = Join-Path $env:TEMP "slm-port-input-$([guid]::NewGuid().ToString('N')).txt"
             Set-Content -Path $portInputFile -Value $port -Encoding ASCII
             Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath, "port") -NoNewWindow -Wait -RedirectStandardInput $portInputFile
+
+            if (-not (Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue)) {
+                Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name's firewall rule wasn't found after 'slm.bat port' - creating it directly instead."
+                New-NetFirewallRule -DisplayName $firewallRuleName -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -ErrorAction SilentlyContinue | Out-Null
+            }
 
             Write-WinUtilLog -Component "Package" -Message "Registering $name to start at logon"
             if ($ProgressCallback) { try { & $ProgressCallback "Registering $name to start at logon..." } catch {} }

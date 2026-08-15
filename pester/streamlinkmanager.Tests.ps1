@@ -32,6 +32,8 @@ Describe "Install-WinUtilStreamLinkManager" {
         Mock Start-Process { }
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "Streaming Library Manager" } }
         Mock Start-ScheduledTask { }
+        Mock Get-NetFirewallRule { [pscustomobject]@{ DisplayName = "Streaming Library Manager" } }
+        Mock New-NetFirewallRule { }
     }
 
     It "reports each milestone via ProgressCallback, in order, when supplied" {
@@ -125,6 +127,30 @@ Describe "Install-WinUtilStreamLinkManager" {
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "99" })
 
         Should -Invoke -CommandName Set-Content -Times 1 -Exactly -ParameterFilter { $Value -eq "5000" }
+    }
+
+    It "does not create its own firewall rule when slm.bat's own 'port' command already created one" {
+        Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
+
+        Should -Invoke -CommandName New-NetFirewallRule -Times 0 -Exactly
+    }
+
+    It "creates the firewall rule itself as a fallback when slm.bat's own attempt didn't land" {
+        # Regression guard for a real reported bug: slm.bat's own "port" handler calls
+        # `timeout /NOBREAK /T 5` to wait for its elevated netsh call to finish, but timeout.exe
+        # hard-refuses to run at all against the redirected (non-console) stdin this function
+        # uses to feed the port number in - confirmed live via "ERROR: Input redirection is not
+        # supported, exiting the process immediately." in the install log. That skips the
+        # intended wait entirely, so slm.bat can end up deleting its temp netsh script before the
+        # elevated, UAC-gated process has necessarily had a chance to read it - and slm.bat never
+        # checks whether the rule actually got created before printing success regardless.
+        Mock Get-NetFirewallRule { $null }
+
+        Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "7654" })
+
+        Should -Invoke -CommandName New-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
+            $DisplayName -eq "Streaming Library Manager" -and $LocalPort -eq "7654" -and $Protocol -eq "TCP"
+        }
     }
 
     It "still creates the firewall-scoping 'port' rule even for the default port" {
