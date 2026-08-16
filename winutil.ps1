@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.15.1411
+    Version        : v2026.08.16.0915
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.15.1411"
+$sync.version = "v2026.08.16.0915"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2431,6 +2431,14 @@ Function Install-WinUtilStreamLinkManager {
         rule) directly, keeps this on the same footing as "upgrade" and "startup": tracking
         upstream's own current logic for that command, not a second copy of it that could drift.
 
+        The existing firewall rule (if any) is removed unconditionally before "port" runs, not
+        just when it's found to be stale - author-confirmed gap: netsh (what slm.bat's own
+        "port" command uses to create it) doesn't enforce unique rule names, so changing SLM_PORT
+        on an upgrade used to leave the old port's rule behind as a second, orphaned rule with
+        the same DisplayName rather than replacing it. Removing first, every run, guarantees at
+        most one rule for this app exists afterward regardless of whether the port actually
+        changed.
+
         The firewall rule is still verified afterward, not just trusted from slm.bat's own
         output - if it's still missing (the timeout.exe race is fixed, but nothing guarantees an
         elevated, UAC-gated background process finishes in any particular window), this creates
@@ -2447,16 +2455,26 @@ Function Install-WinUtilStreamLinkManager {
         "port" and "startup" may trigger their own UAC prompts as a result (slm.bat's own -Verb
         RunAs calls, not something this function controls) - expected, not a bug to route around.
 
-        The initial "start now" launch runs through that same scheduled task
-        (Start-ScheduledTask), not a second, separate launch of slm.exe - per the author's
-        feedback on the previous version, its separate launch path
-        (Start-WinUtilProcessAsStandardUserNoWait, which has no window-style control at all) is
-        exactly what put the app in a visible foreground window instead of the hidden background
-        one the scheduled task is already configured to produce.
+        The initial "start now" launch runs slm.bat itself with no handle, not
+        Start-ScheduledTask - author-confirmed gap in the previous version: the just-registered
+        task showed as "Queued" in Task Scheduler rather than actually running, needing a manual
+        "Run" click to start it. Start-ScheduledTask, triggered from WinUtil's own elevated
+        process, doesn't reliably resolve the interactive-session token an "onlogon" /
+        RunLevel-highest task expects, apparently a known rough edge for that combination rather
+        than something specific to this task. slm.bat's own no-handle default (`if exist
+        "%executable%" (call %run_command%)`) already does exactly the launch this needed -
+        `Start-Process -WindowStyle hidden` on slm.exe - which was in fact the author's own
+        suggested alternative to the previous version's separate, visibly-foreground
+        Start-WinUtilProcessAsStandardUserNoWait launch ("execute the Task Scheduler item... or
+        do what the .bat does"). Using slm.bat's own default here sidesteps the Task Scheduler
+        rough edge entirely for the immediate launch, while "startup" above still leaves the real
+        scheduled task registered correctly for every future login, which is a completely
+        different code path (the OS itself triggers it at actual logon, not
+        Start-ScheduledTask) and isn't affected by this.
 
-        Known limitation: the catalog's "webui" field (the popup's "Open" button target) is a
-        fixed "http://localhost:5000" - it does not update if SLM_PORT is set to something else
-        here. Nothing currently threads an install-time value back into that static field.
+        The catalog's "webui" field (the popup's "Open" button target) is resolved dynamically
+        via Resolve-WinUtilAppWebUI rather than used as a fixed string, since SLM_PORT can differ
+        from the catalog's declared default - see that function's own docstring.
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -2519,6 +2537,12 @@ Function Install-WinUtilStreamLinkManager {
 
             Write-WinUtilLog -Component "Package" -Message "Setting $name's port to $port"
             if ($ProgressCallback) { try { & $ProgressCallback "Configuring $name's port..." } catch {} }
+            # Removed unconditionally, not just when it's stale, so this always starts from a
+            # clean slate - netsh (what slm.bat's own "port" command uses) doesn't enforce unique
+            # rule names, so re-running "port" with a different value each upgrade would otherwise
+            # accumulate a second rule for the old port rather than replacing it, exactly the
+            # author-reported gap.
+            Remove-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
             $portInputFile = Join-Path $env:TEMP "slm-port-input-$([guid]::NewGuid().ToString('N')).txt"
             Set-Content -Path $portInputFile -Value $port -Encoding ASCII
             Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath, "port") -NoNewWindow -Wait -RedirectStandardInput $portInputFile
@@ -2541,7 +2565,7 @@ Function Install-WinUtilStreamLinkManager {
             if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
                 Write-WinUtilLog -Component "Package" -Message "Starting $name"
                 if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
-                Start-ScheduledTask -TaskName $taskName
+                Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath) -NoNewWindow -Wait
             } else {
                 Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name's scheduled task wasn't found after 'slm.bat startup' - start it manually from $installDir."
             }
@@ -5917,6 +5941,58 @@ function Reset-WPFCheckBoxes {
     }
 }
 
+function Resolve-WinUtilAppWebUI {
+    <#
+    .SYNOPSIS
+        Resolves an app's web UI URL for the popup's "Open" button, substituting the current
+        value of a declared environment variable in place of the catalog's default port when
+        the app's actual port can change after install.
+
+    .DESCRIPTION
+        Author-confirmed gap: Streaming Library Manager's "Open Web Interface" button was
+        hardcoded to the catalog's declared default port (5000) even after SLM_PORT was set to
+        something else during install - the popup always opened the wrong port. Only kicks in
+        for a catalog entry that declares "webuiPortEnvVar" (currently just
+        streamlinkmanager: "SLM_PORT") - every other app's "webui" is returned completely
+        unchanged, matching the existing, pre-this-function behavior for the rest of the catalog.
+
+        [Environment]::GetEnvironmentVariable(..., "User") rather than $env:<name> - the env var
+        is set via setx (a registry write, read by NEW processes at their own startup), which
+        WinUtil's own already-running process would never pick up into its own $env: snapshot
+        without a restart; the .NET API reads the registry value directly instead, live.
+
+        The port is found and replaced by matching ":<digits>" immediately before a "/" or the
+        end of the string, not by parsing and rebuilding the URI with UriBuilder - UriBuilder
+        normalizes a path-less URL by appending a trailing "/", which would turn an otherwise
+        unrelated, cosmetic difference from the catalog's own plain "http://localhost:5000" (no
+        trailing slash) into an apparent behavior change. If no explicit port is found to
+        replace (e.g. the catalog's URL doesn't declare one at all), the original URL is
+        returned unchanged rather than guessing where to insert one.
+
+    .OUTPUTS
+        The resolved URL string, or $null if the app has no "webui" declared at all.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$AppObject
+    )
+
+    if ([string]::IsNullOrWhiteSpace($AppObject.webui)) {
+        return $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($AppObject.webuiPortEnvVar)) {
+        return $AppObject.webui
+    }
+
+    $envPort = [Environment]::GetEnvironmentVariable($AppObject.webuiPortEnvVar, "User")
+    if ([string]::IsNullOrWhiteSpace($envPort) -or $envPort -notmatch '^\d+$') {
+        return $AppObject.webui
+    }
+
+    return [regex]::Replace($AppObject.webui, ':\d+(?=/|$)', ":$envPort")
+}
+
 function Resolve-WinUtilPackagePrompts {
     <#
     .SYNOPSIS
@@ -5927,6 +6003,18 @@ function Resolve-WinUtilPackagePrompts {
         Must be called from the UI thread - before the selection is handed off to the
         background install runspace, which may not be an STA thread and cannot reliably
         show its own dialogs.
+
+    .DESCRIPTION
+        A prompt declaring "defaultEnvVar" gets its dialog default resolved here, from that
+        environment variable's CURRENT value, immediately before the dialog is shown - not
+        baked into the catalog's own static JSON, which can't express "whatever this is set to
+        right now." Author-confirmed use case: Streaming Library Manager's SLM_PORT prompt
+        should default to the port it's already configured with on a reinstall/upgrade, not
+        silently fall back to the catalog's plain 5000 every time. Falls back to the prompt's
+        own plain "default" (or none at all) when the env var isn't set - most prompts declare
+        neither and are completely unaffected. Built as a new prompt object per package rather
+        than mutating $package.prompts in place, since that array is the shared, cached catalog
+        object every other install of the same app would also read.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -5942,7 +6030,25 @@ function Resolve-WinUtilPackagePrompts {
             continue
         }
 
-        $values = Show-WinUtilPromptDialog -Title $package.content -Message "$($package.content) needs a few values before installing:" -Prompts $package.prompts
+        $resolvedPrompts = @($package.prompts | ForEach-Object {
+            $prompt = $_
+            $defaultValue = $prompt.default
+            if (-not [string]::IsNullOrWhiteSpace($prompt.defaultEnvVar)) {
+                $envValue = [Environment]::GetEnvironmentVariable($prompt.defaultEnvVar, "User")
+                if (-not [string]::IsNullOrWhiteSpace($envValue)) {
+                    $defaultValue = $envValue
+                }
+            }
+            [pscustomobject]@{
+                name      = $prompt.name
+                label     = $prompt.label
+                secret    = $prompt.secret
+                minLength = $prompt.minLength
+                default   = $defaultValue
+            }
+        })
+
+        $values = Show-WinUtilPromptDialog -Title $package.content -Message "$($package.content) needs a few values before installing:" -Prompts $resolvedPrompts
 
         if ($null -eq $values) {
             Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping $($package.content) - prompt cancelled."
@@ -7189,7 +7295,12 @@ function Show-WinUtilPromptDialog {
     .PARAMETER Prompts
         Array of objects with at least a "name" and "label"; optional "secret" (bool) masks
         the field and adds a Show/Hide toggle; optional "minLength" (int) rejects OK until
-        the entered value meets that length.
+        the entered value meets that length; optional "default" (string) pre-fills a non-secret
+        field's text (ignored for secret fields - pre-filling a password field would show a
+        stored secret back to whoever's looking at the screen, not a trade worth making for
+        typing convenience). Resolving a "default" dynamically (e.g. from an environment
+        variable) is the caller's job - see Resolve-WinUtilPackagePrompts - this function only
+        ever displays whatever plain string it's handed.
 
     .OUTPUTS
         Hashtable of name -> entered value, or $null if the dialog was cancelled.
@@ -7304,6 +7415,7 @@ function Show-WinUtilPromptDialog {
         } else {
             $field = New-Object Windows.Controls.TextBox
             $field.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
+            if ($prompt.default) { $field.Text = [string]$prompt.default }
             [void]$stack.Children.Add($field)
             $inputs[$prompt.name] = [pscustomobject]@{
                 Secret    = $false
@@ -8543,12 +8655,19 @@ Function Uninstall-WinUtilStreamLinkManager {
 
         Since Install-WinUtilStreamLinkManager owns the entire install location (a fixed folder
         under LocalAppData that only it writes to), this can safely remove it outright: stop the
-        process, unregister the logon scheduled task, remove the firewall rule, delete the
-        install directory. Also removes "StreamLinkManager" (the previous, incorrectly-named
-        install folder, before this was fixed to match the app's actual name) if still present,
-        so upgrading past that old bug doesn't leave an orphaned copy of the app behind - this is
-        the exact "leftover files after an uninstall" problem this project has been chasing
-        elsewhere, self-inflicted here by an earlier version of this same function.
+        process, unregister the logon scheduled task, remove the firewall rule, remove the
+        persisted SLM_PORT user environment variable, delete the install directory. Also removes
+        "StreamLinkManager" (the previous, incorrectly-named install folder, before this was
+        fixed to match the app's actual name) if still present, so upgrading past that old bug
+        doesn't leave an orphaned copy of the app behind - this is the exact "leftover files
+        after an uninstall" problem this project has been chasing elsewhere, self-inflicted here
+        by an earlier version of this same function.
+
+        Author-confirmed gap: SLM_PORT (set via slm.bat's own "port" command, using setx) used
+        to survive uninstall entirely - setx has no built-in removal counterpart, so this has to
+        be done directly. [Environment]::SetEnvironmentVariable(name, $null, "User") is the
+        documented way to delete a persisted user environment variable via .NET (a $null value
+        removes the registry value rather than setting it to an empty string).
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -8578,6 +8697,7 @@ Function Uninstall-WinUtilStreamLinkManager {
             }
 
             Remove-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable("SLM_PORT", $null, "User")
 
             foreach ($dir in @($installDir, $oldInstallDir)) {
                 if (Test-Path $dir) {
@@ -8943,9 +9063,10 @@ function Initialize-WPFUI {
                         # the install location) and winget/choco don't hand back an install path.
                         $newButton.Add_MouseEnter({
                             $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
-                            if ($appObject.webui) {
-                                $this.Tag = $appObject.webui
-                                $this.ToolTip = "Open web interface`n$($appObject.webui)"
+                            $resolvedWebui = Resolve-WinUtilAppWebUI -AppObject $appObject
+                            if ($resolvedWebui) {
+                                $this.Tag = $resolvedWebui
+                                $this.ToolTip = "Open web interface`n$resolvedWebui"
                             } else {
                                 $this.Tag = Find-WinUtilAppLaunchTarget -AppName $appObject.content
                                 $this.ToolTip = if ($this.Tag) {
@@ -12033,12 +12154,15 @@ $sync.configs.applications = @'
     "link": "https://github.com/babsonnexus/stream-link-manager-for-channels",
     "icon": "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/static/assets/img/slm_navicon.png",
     "webui": "http://localhost:5000",
+    "webuiPortEnvVar": "SLM_PORT",
     "handle": "@babsonnexus",
     "installType": "streamLinkManager",
     "prompts": [
       {
         "name": "SLM_PORT",
-        "label": "Port for its web interface (1000-9999, leave blank for the default 5000)"
+        "label": "Port for its web interface (1000-9999, leave blank for the default 5000)",
+        "default": "5000",
+        "defaultEnvVar": "SLM_PORT"
       },
       {
         "name": "SLM_PRERELEASE",

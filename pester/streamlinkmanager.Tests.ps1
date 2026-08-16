@@ -33,9 +33,9 @@ Describe "Install-WinUtilStreamLinkManager" {
         Mock Remove-Item { }
         Mock Start-Process { }
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = "Streaming Library Manager" } }
-        Mock Start-ScheduledTask { }
         Mock Get-NetFirewallRule { [pscustomobject]@{ DisplayName = "Streaming Library Manager" } }
         Mock New-NetFirewallRule { }
+        Mock Remove-NetFirewallRule { }
     }
 
     It "reports each milestone via ProgressCallback, in order, when supplied" {
@@ -64,7 +64,8 @@ Describe "Install-WinUtilStreamLinkManager" {
     It "does not let a failing ProgressCallback abort the install" {
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage) -ProgressCallback { throw "boom" }
 
-        Should -Invoke -CommandName Start-ScheduledTask -Times 1 -Exactly
+        # upgrade, port, startup, and the final bare-launch each call Start-Process once.
+        Should -Invoke -CommandName Start-Process -Times 4 -Exactly
     }
 
     It "downloads slm.bat itself from the upstream repo into the install directory" {
@@ -163,6 +164,19 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
+    It "removes any existing firewall rule unconditionally before configuring the port" {
+        # Regression guard for an author-confirmed gap: netsh (what slm.bat's own "port" command
+        # uses to create the rule) doesn't enforce unique rule names, so changing SLM_PORT during
+        # an upgrade used to leave the old port's rule behind as an orphaned second rule with the
+        # same DisplayName instead of replacing it. Removing unconditionally on every run - not
+        # only when the port actually changed - guarantees at most one rule ever exists.
+        Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
+
+        Should -Invoke -CommandName Remove-NetFirewallRule -Times 1 -Exactly -ParameterFilter {
+            $DisplayName -eq "Streaming Library Manager"
+        }
+    }
+
     It "does not recreate the firewall rule when one already exists from a previous install" {
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
 
@@ -212,15 +226,19 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
-    It "starts the app through the scheduled task, not a second separate launch" {
-        # Regression guard for the actual reported bug in the previous version: launching
-        # slm.exe a second, different way (Start-WinUtilProcessAsStandardUserNoWait, which has
-        # no window-style control) is what put the app in a visible foreground window instead of
-        # the hidden background one the scheduled task is already configured to produce.
+    It "starts the app by running slm.bat with no handle, not Start-ScheduledTask" {
+        # Regression guard for an author-confirmed bug: the just-registered task showed as
+        # "Queued" in Task Scheduler after Start-ScheduledTask, needing a manual "Run" click to
+        # actually start - apparently a rough edge specific to triggering an onlogon/
+        # RunLevel-highest task that way from WinUtil's own elevated process, not something
+        # specific to this one task. slm.bat's own no-handle default already launches slm.exe
+        # hidden itself (`if exist "%executable%" (call %run_command%)`, which runs
+        # `Start-Process -WindowStyle hidden`) - the author's own suggested alternative to the
+        # even earlier version's separate, visibly-foreground launch.
         Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
 
-        Should -Invoke -CommandName Start-ScheduledTask -Times 1 -Exactly -ParameterFilter {
-            $TaskName -eq "Streaming Library Manager"
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "cmd.exe" -and $ArgumentList.Count -eq 2 -and $ArgumentList[0] -eq "/c" -and $ArgumentList[1] -eq $script:batPath
         }
     }
 
@@ -229,7 +247,9 @@ Describe "Install-WinUtilStreamLinkManager" {
 
         { Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage) } | Should -Not -Throw
 
-        Should -Invoke -CommandName Start-ScheduledTask -Times 0 -Exactly
+        Should -Invoke -CommandName Start-Process -Times 0 -Exactly -ParameterFilter {
+            $ArgumentList.Count -eq 2 -and $ArgumentList[0] -eq "/c" -and $ArgumentList[1] -eq $script:batPath
+        }
     }
 
     It "logs an error instead of throwing when slm.exe is missing after upgrade" {

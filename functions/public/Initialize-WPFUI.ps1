@@ -144,9 +144,10 @@ function Initialize-WPFUI {
                         # the install location) and winget/choco don't hand back an install path.
                         $newButton.Add_MouseEnter({
                             $appObject = $sync.configs.applicationsHashtable.$($sync.appPopupSelectedApp)
-                            if ($appObject.webui) {
-                                $this.Tag = $appObject.webui
-                                $this.ToolTip = "Open web interface`n$($appObject.webui)"
+                            $resolvedWebui = Resolve-WinUtilAppWebUI -AppObject $appObject
+                            if ($resolvedWebui) {
+                                $this.Tag = $resolvedWebui
+                                $this.ToolTip = "Open web interface`n$resolvedWebui"
                             } else {
                                 $this.Tag = Find-WinUtilAppLaunchTarget -AppName $appObject.content
                                 $this.ToolTip = if ($this.Tag) {

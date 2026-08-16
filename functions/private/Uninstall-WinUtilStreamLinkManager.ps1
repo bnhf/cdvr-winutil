@@ -23,12 +23,19 @@ Function Uninstall-WinUtilStreamLinkManager {
 
         Since Install-WinUtilStreamLinkManager owns the entire install location (a fixed folder
         under LocalAppData that only it writes to), this can safely remove it outright: stop the
-        process, unregister the logon scheduled task, remove the firewall rule, delete the
-        install directory. Also removes "StreamLinkManager" (the previous, incorrectly-named
-        install folder, before this was fixed to match the app's actual name) if still present,
-        so upgrading past that old bug doesn't leave an orphaned copy of the app behind - this is
-        the exact "leftover files after an uninstall" problem this project has been chasing
-        elsewhere, self-inflicted here by an earlier version of this same function.
+        process, unregister the logon scheduled task, remove the firewall rule, remove the
+        persisted SLM_PORT user environment variable, delete the install directory. Also removes
+        "StreamLinkManager" (the previous, incorrectly-named install folder, before this was
+        fixed to match the app's actual name) if still present, so upgrading past that old bug
+        doesn't leave an orphaned copy of the app behind - this is the exact "leftover files
+        after an uninstall" problem this project has been chasing elsewhere, self-inflicted here
+        by an earlier version of this same function.
+
+        Author-confirmed gap: SLM_PORT (set via slm.bat's own "port" command, using setx) used
+        to survive uninstall entirely - setx has no built-in removal counterpart, so this has to
+        be done directly. [Environment]::SetEnvironmentVariable(name, $null, "User") is the
+        documented way to delete a persisted user environment variable via .NET (a $null value
+        removes the registry value rather than setting it to an empty string).
 
         ProgressCallback works the same way as Install-WinUtilProgramDirect's - see that
         function's docstring for why it exists.
@@ -58,6 +65,7 @@ Function Uninstall-WinUtilStreamLinkManager {
             }
 
             Remove-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable("SLM_PORT", $null, "User")
 
             foreach ($dir in @($installDir, $oldInstallDir)) {
                 if (Test-Path $dir) {

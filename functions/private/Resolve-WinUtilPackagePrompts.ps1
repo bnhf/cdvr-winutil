@@ -8,6 +8,18 @@ function Resolve-WinUtilPackagePrompts {
         Must be called from the UI thread - before the selection is handed off to the
         background install runspace, which may not be an STA thread and cannot reliably
         show its own dialogs.
+
+    .DESCRIPTION
+        A prompt declaring "defaultEnvVar" gets its dialog default resolved here, from that
+        environment variable's CURRENT value, immediately before the dialog is shown - not
+        baked into the catalog's own static JSON, which can't express "whatever this is set to
+        right now." Author-confirmed use case: Streaming Library Manager's SLM_PORT prompt
+        should default to the port it's already configured with on a reinstall/upgrade, not
+        silently fall back to the catalog's plain 5000 every time. Falls back to the prompt's
+        own plain "default" (or none at all) when the env var isn't set - most prompts declare
+        neither and are completely unaffected. Built as a new prompt object per package rather
+        than mutating $package.prompts in place, since that array is the shared, cached catalog
+        object every other install of the same app would also read.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -23,7 +35,25 @@ function Resolve-WinUtilPackagePrompts {
             continue
         }
 
-        $values = Show-WinUtilPromptDialog -Title $package.content -Message "$($package.content) needs a few values before installing:" -Prompts $package.prompts
+        $resolvedPrompts = @($package.prompts | ForEach-Object {
+            $prompt = $_
+            $defaultValue = $prompt.default
+            if (-not [string]::IsNullOrWhiteSpace($prompt.defaultEnvVar)) {
+                $envValue = [Environment]::GetEnvironmentVariable($prompt.defaultEnvVar, "User")
+                if (-not [string]::IsNullOrWhiteSpace($envValue)) {
+                    $defaultValue = $envValue
+                }
+            }
+            [pscustomobject]@{
+                name      = $prompt.name
+                label     = $prompt.label
+                secret    = $prompt.secret
+                minLength = $prompt.minLength
+                default   = $defaultValue
+            }
+        })
+
+        $values = Show-WinUtilPromptDialog -Title $package.content -Message "$($package.content) needs a few values before installing:" -Prompts $resolvedPrompts
 
         if ($null -eq $values) {
             Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Skipping $($package.content) - prompt cancelled."

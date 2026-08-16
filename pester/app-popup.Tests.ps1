@@ -8,6 +8,7 @@ BeforeAll {
     Add-Type -AssemblyName PresentationFramework
     . (Join-Path $script:repoRoot "functions\public\Initialize-WPFUI.ps1")
     . (Join-Path $script:repoRoot "functions\private\Initialize-InstallAppEntry.ps1")
+    . (Join-Path $script:repoRoot "functions\private\Resolve-WinUtilAppWebUI.ps1")
 
     function Invoke-WPFSelectedCheckboxesUpdate { param($type, $checkboxName) }
     function New-WinUtilFossBadge { New-Object Windows.Controls.Border }

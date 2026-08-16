@@ -169,10 +169,11 @@
         "link": "https://github.com/babsonnexus/stream-link-manager-for-channels",
         "icon": "https://raw.githubusercontent.com/babsonnexus/stream-link-manager-for-channels/main/static/assets/img/slm_navicon.png",
         "webui": "http://localhost:5000",
+        "webuiPortEnvVar": "SLM_PORT",
         "handle": "@babsonnexus",
         "installType": "streamLinkManager",
         "prompts": [
-            { "name": "SLM_PORT", "label": "Port for its web interface (1000-9999, leave blank for the default 5000)" },
+            { "name": "SLM_PORT", "label": "Port for its web interface (1000-9999, leave blank for the default 5000)", "default": "5000", "defaultEnvVar": "SLM_PORT" },
             { "name": "SLM_PRERELEASE", "label": "Install the prerelease build? (yes/no, default no)" }
         ],
         "foss": true

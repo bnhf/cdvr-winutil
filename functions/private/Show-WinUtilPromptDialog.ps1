@@ -13,7 +13,12 @@ function Show-WinUtilPromptDialog {
     .PARAMETER Prompts
         Array of objects with at least a "name" and "label"; optional "secret" (bool) masks
         the field and adds a Show/Hide toggle; optional "minLength" (int) rejects OK until
-        the entered value meets that length.
+        the entered value meets that length; optional "default" (string) pre-fills a non-secret
+        field's text (ignored for secret fields - pre-filling a password field would show a
+        stored secret back to whoever's looking at the screen, not a trade worth making for
+        typing convenience). Resolving a "default" dynamically (e.g. from an environment
+        variable) is the caller's job - see Resolve-WinUtilPackagePrompts - this function only
+        ever displays whatever plain string it's handed.
 
     .OUTPUTS
         Hashtable of name -> entered value, or $null if the dialog was cancelled.
@@ -128,6 +133,7 @@ function Show-WinUtilPromptDialog {
         } else {
             $field = New-Object Windows.Controls.TextBox
             $field.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
+            if ($prompt.default) { $field.Text = [string]$prompt.default }
             [void]$stack.Children.Add($field)
             $inputs[$prompt.name] = [pscustomobject]@{
                 Secret    = $false
