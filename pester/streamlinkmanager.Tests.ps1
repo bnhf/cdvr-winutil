@@ -256,6 +256,26 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
+    It "sets `$env:SLM_PORT directly before the final launch, so slm.exe actually sees it" {
+        # Regression guard for an author-reported bug: SLM started on the catalog's default port
+        # 5000 instead of the one just configured, during the very install/upgrade run that set
+        # it. slm.bat's own "port" command sets SLM_PORT via setx, which only writes the
+        # registry for processes started AFTER that write - it never reaches a process already
+        # running (this one, and everything it spawns) through inheritance, no matter how long
+        # afterward a child of it launches. Setting it directly here is what actually reaches
+        # slm.exe: env vars inherit down the whole spawn chain from whoever sets them.
+        $originalValue = $env:SLM_PORT
+        try {
+            Remove-Item Env:\SLM_PORT -ErrorAction SilentlyContinue
+
+            Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage -PromptValues @{ SLM_PORT = "7654" })
+
+            $env:SLM_PORT | Should -Be "7654"
+        } finally {
+            if ($null -eq $originalValue) { Remove-Item Env:\SLM_PORT -ErrorAction SilentlyContinue } else { $env:SLM_PORT = $originalValue }
+        }
+    }
+
     It "logs a warning instead of throwing when the scheduled task isn't found after 'startup'" {
         Mock Get-ScheduledTask { $null }
 

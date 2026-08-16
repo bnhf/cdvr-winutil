@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.16.0931
+    Version        : v2026.08.16.1108
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.16.0931"
+$sync.version = "v2026.08.16.1108"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -2485,6 +2485,24 @@ Function Install-WinUtilStreamLinkManager {
         anyway - the actual launch (slm.bat's own hidden Start-Process, already fired by the time
         this returns) is what matters, not the wrapper cmd.exe process around it.
 
+        $env:SLM_PORT is set here, directly, right before this specific launch - author-confirmed
+        bug: SLM started on the catalog's default port 5000 instead of the one just configured,
+        during the very install/upgrade run that set it. slm.bat's own "port" command sets
+        SLM_PORT via setx, which only writes the registry for processes started AFTER that write
+        - it never touches the environment block of a process already running, and every launch
+        in this function is a descendant of WinUtil's own single, already-running process, so
+        none of them see it through inheritance no matter how long after "port" they run. A
+        genuinely new session (an actual logon, which is exactly what makes the scheduled task
+        above correct for every future login - never the problem here) rebuilds its environment
+        from the registry fresh and would see it correctly; upstream's own script says as much
+        ("restart Streaming Library Manager in a new window for the port to take effect"), which
+        is effectively what the author suggested (launch a separate terminal just for this).
+        Setting $env:SLM_PORT here instead is simpler and doesn't require detaching a real new
+        session: this process already holds the correct value in $port, and environment
+        variables inherit down the whole spawn chain from whoever sets them - cmd.exe, then the
+        nested powershell.exe it runs, then finally slm.exe itself - so correcting it once, at
+        the top of that chain, right before it's spawned, reaches every link below it.
+
         The catalog's "webui" field (the popup's "Open" button target) is resolved dynamically
         via Resolve-WinUtilAppWebUI rather than used as a fixed string, since SLM_PORT can differ
         from the catalog's declared default - see that function's own docstring.
@@ -2578,6 +2596,17 @@ Function Install-WinUtilStreamLinkManager {
             if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
                 Write-WinUtilLog -Component "Package" -Message "Starting $name"
                 if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
+                # slm.bat's own "port" command sets SLM_PORT via setx, which only writes the
+                # registry for future processes - it never touches the environment block of a
+                # process already running, this one included. Setting it here, directly in our
+                # own process right before spawning this launch, is what actually makes the
+                # value reach slm.exe: env vars inherit down the whole spawn chain (cmd.exe -> a
+                # nested powershell.exe -> Start-Process -WindowStyle hidden on slm.exe), so
+                # correcting it at the top of that chain fixes every link below it too, with no
+                # dependency on setx's registry round-trip (which only a genuinely new session -
+                # an actual logon - re-reads; that's also why the scheduled task above works
+                # correctly for every future login and was never the problem here).
+                $env:SLM_PORT = $port
                 Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath) -NoNewWindow
             } else {
                 Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name's scheduled task wasn't found after 'slm.bat startup' - start it manually from $installDir."
