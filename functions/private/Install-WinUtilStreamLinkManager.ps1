@@ -100,6 +100,19 @@ Function Install-WinUtilStreamLinkManager {
         different code path (the OS itself triggers it at actual logon, not
         Start-ScheduledTask) and isn't affected by this.
 
+        This one call - unlike the three before it - is run without -Wait. Confirmed live: with
+        it, the whole install hung indefinitely (5+ minutes and still going) right after logging
+        "Starting Streaming Library Manager", with nothing further and no error. -NoNewWindow
+        shares handles down the entire process tree it spawns (cmd.exe -> the nested powershell
+        -> Start-Process -WindowStyle hidden slm.exe), and slm.exe is the one target across all
+        four invocations that's actually meant to keep running afterward, not exit - a classic
+        .NET Process.WaitForExit gotcha: waiting doesn't stop at the immediate child, it stops
+        once every process still holding an inherited handle exits, and a persistent web server
+        never does. "upgrade"/"port"/"startup" never hit this because everything they spawn is
+        short-lived and exits on its own. Nothing here depends on this particular call finishing
+        anyway - the actual launch (slm.bat's own hidden Start-Process, already fired by the time
+        this returns) is what matters, not the wrapper cmd.exe process around it.
+
         The catalog's "webui" field (the popup's "Open" button target) is resolved dynamically
         via Resolve-WinUtilAppWebUI rather than used as a fixed string, since SLM_PORT can differ
         from the catalog's declared default - see that function's own docstring.
@@ -193,7 +206,7 @@ Function Install-WinUtilStreamLinkManager {
             if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
                 Write-WinUtilLog -Component "Package" -Message "Starting $name"
                 if ($ProgressCallback) { try { & $ProgressCallback "Starting $name..." } catch {} }
-                Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath) -NoNewWindow -Wait
+                Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $batPath) -NoNewWindow
             } else {
                 Write-WinUtilLog -Level "WARN" -Component "Package" -Message "$name's scheduled task wasn't found after 'slm.bat startup' - start it manually from $installDir."
             }

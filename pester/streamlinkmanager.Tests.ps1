@@ -242,6 +242,20 @@ Describe "Install-WinUtilStreamLinkManager" {
         }
     }
 
+    It "does not pass -Wait to the bare slm.bat launch" {
+        # Regression guard for the actual reported bug: -Wait here made the whole install hang
+        # indefinitely. -NoNewWindow shares handles down the whole process tree this spawns
+        # (cmd.exe -> a nested powershell -> Start-Process -WindowStyle hidden on slm.exe), and
+        # slm.exe is a persistent web server that's never meant to exit - a classic .NET
+        # Process.WaitForExit gotcha where waiting doesn't stop at the immediate child, it stops
+        # once every process still holding an inherited handle exits.
+        Install-WinUtilStreamLinkManager -Packages @(New-WinUtilSlmPackage)
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList.Count -eq 2 -and $ArgumentList[1] -eq $script:batPath -and (-not $Wait)
+        }
+    }
+
     It "logs a warning instead of throwing when the scheduled task isn't found after 'startup'" {
         Mock Get-ScheduledTask { $null }
 
