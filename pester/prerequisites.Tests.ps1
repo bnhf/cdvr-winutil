@@ -175,6 +175,41 @@ Describe "Test-WinUtilVirtualizationFirmwareEnabled" {
         Mock Get-CimInstance { throw "WMI unavailable" }
         Test-WinUtilVirtualizationFirmwareEnabled | Should -BeNullOrEmpty
     }
+
+    It "returns true when a hypervisor is already present, without needing VirtualizationFirmwareEnabled at all" {
+        # Regression guard for an author-reported false positive: "virtualization is disabled"
+        # popped up on a fresh Windows 11 install with virtualization genuinely enabled in the
+        # BIOS. VirtualizationFirmwareEnabled is a documented, real WMI quirk - it goes
+        # unreliable once a hypervisor is already active on top of VT-x/AMD-V, which modern
+        # Windows 11 often is from first boot (Virtualization-Based Security/Core Isolation is on
+        # by default on most current hardware). HypervisorPresent=$true is direct proof
+        # virtualization works, so it must short-circuit to $true before ever consulting the
+        # unreliable firmware flag - Win32_Processor is mocked to actively lie here to prove
+        # that.
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
+        Mock Get-CimInstance {
+            [pscustomobject]@{ HypervisorPresent = $true }
+        } -ParameterFilter { $ClassName -eq "Win32_ComputerSystem" }
+        Mock Get-CimInstance {
+            [pscustomobject]@{ VirtualizationFirmwareEnabled = $false }
+        } -ParameterFilter { $ClassName -eq "Win32_Processor" }
+
+        Test-WinUtilVirtualizationFirmwareEnabled | Should -Be $true
+
+        Should -Invoke -CommandName Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -eq "Win32_Processor" }
+    }
+
+    It "falls back to VirtualizationFirmwareEnabled when no hypervisor is present" {
+        Mock Invoke-WinUtilWithTimeout { & $ScriptBlock }
+        Mock Get-CimInstance {
+            [pscustomobject]@{ HypervisorPresent = $false }
+        } -ParameterFilter { $ClassName -eq "Win32_ComputerSystem" }
+        Mock Get-CimInstance {
+            [pscustomobject]@{ VirtualizationFirmwareEnabled = $true }
+        } -ParameterFilter { $ClassName -eq "Win32_Processor" }
+
+        Test-WinUtilVirtualizationFirmwareEnabled | Should -Be $true
+    }
 }
 
 Describe "Invoke-WinUtilWithTimeout" {

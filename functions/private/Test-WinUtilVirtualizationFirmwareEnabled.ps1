@@ -21,9 +21,33 @@ function Test-WinUtilVirtualizationFirmwareEnabled {
         operation. A timeout returns $null (same as any other "couldn't determine" case), not
         $false - it isn't evidence virtualization is disabled, just that this particular query
         didn't come back in time.
+
+        Checks Win32_ComputerSystem.HypervisorPresent before Win32_Processor's own
+        VirtualizationFirmwareEnabled, not instead of it. Author-reported false positive: this
+        popped up "virtualization is disabled" on a fresh Windows 11 install with virtualization
+        genuinely enabled in the BIOS. VirtualizationFirmwareEnabled is a documented, real WMI
+        quirk (multiple independent reports, not this project's own guess) - it goes unreliable,
+        specifically reporting $false, once a hypervisor is already active on top of the CPU's
+        VT-x/AMD-V extensions, because at that point the hypervisor - not this property - is
+        what's actually reflecting hardware state. Modern Windows 11 ships with Virtualization-
+        Based Security (Core Isolation) on by default on most current hardware, meaning a
+        hypervisor is very often already running from first boot, before WSL2/Hyper-V is ever
+        touched - so this false positive isn't an edge case on new hardware, it's close to the
+        default. HypervisorPresent reporting $true is direct, unambiguous proof virtualization
+        works (a hypervisor cannot run without it), checked first and short-circuits to $true
+        without needing the firmware flag at all. Does not fully close every possible false
+        negative on its own - some reports describe VirtualizationFirmwareEnabled misreporting
+        even with no hypervisor active at all, apparently a genuine firmware/OS reporting bug on
+        specific hardware unrelated to this - but it directly fixes the common, predictable case
+        this was actually reported for.
     #>
     Invoke-WinUtilWithTimeout -TimeoutSeconds 8 -DefaultValue $null -ScriptBlock {
         try {
+            $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1
+            if ($computerSystem -and $computerSystem.HypervisorPresent) {
+                return $true
+            }
+
             $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
             if ($null -eq $cpu -or $null -eq $cpu.VirtualizationFirmwareEnabled) {
                 return $null
