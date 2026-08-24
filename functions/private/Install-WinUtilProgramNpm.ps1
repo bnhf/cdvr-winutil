@@ -139,8 +139,15 @@ Function Install-WinUtilProgramNpm {
 
         # Some npm-distributed tools need a separate step to actually start running (or set up
         # their own auto-start) after the package itself is installed - e.g. Prismcast installs
-        # as a dormant CLI until "prismcast service install" registers and starts it as a
-        # background service.
+        # as a dormant CLI until "prismcast service install" registers it as a background
+        # service. "service install" alone only covers first-time registration though - on an
+        # update, preInstallCommand already stopped the existing service to release its file
+        # locks, and "service install" is a no-op against an already-registered service, so it
+        # never comes back up on its own. Prismcast's own recommended fix-up for this is "service
+        # restart" (what its own "prismcast upgrade" command runs internally - not used here
+        # since this flow updates via plain "npm install -g" instead), so Prismcast's declared
+        # postInstallCommand chains both: "service install" for a fresh install, "service
+        # restart" to guarantee it's actually running afterward either way.
         if ($Action -eq "Install" -and $process.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($package.postInstallCommand)) {
             Write-WinUtilLog -Component "Package" -Message "Running post-install step for $name`: $($package.postInstallCommand)"
             try {
