@@ -177,7 +177,77 @@ Describe "Install-WinUtilProgramNpm preUninstallCommand" {
     }
 }
 
-Describe "Install-WinUtilProgramNpm process cleanup before uninstall" {
+Describe "Install-WinUtilProgramNpm preInstallCommand" {
+    BeforeEach {
+        Mock Write-WinUtilLog { }
+        Mock Update-WinUtilSessionPath { }
+        Mock Get-Command { [pscustomobject]@{ Name = "npm" } } -ParameterFilter { $Name -eq "npm" }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+    }
+
+    It "runs preInstallCommand before the npm install itself, for a package that declares one" {
+        # Regression guard for the actual reported bug: updating an already-running Prismcast
+        # failed with npm error EBUSY ("resource busy or locked") trying to rename its existing
+        # package folder, the same underlying cause as the uninstall EBUSY (its background
+        # service still holding those files open) but hit via "npm install -g" on an
+        # already-installed package instead of "npm uninstall".
+        Remove-Variable -Name preInstallRanBeforeNpm -Scope Script -ErrorAction SilentlyContinue
+        Mock Start-Process {
+            $script:preInstallRanBeforeNpm = $script:preInstallRan -eq $true
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+        $pkg = [pscustomobject]@{
+            content = "Prismcast"; npmPackage = "prismcast"
+            preInstallCommand = 'Set-Variable -Name preInstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
+
+        $script:preInstallRan | Should -BeTrue
+        $script:preInstallRanBeforeNpm | Should -BeTrue
+        Remove-Variable -Name preInstallRan -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name preInstallRanBeforeNpm -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It "does not run preInstallCommand on uninstall, even when the package declares one" {
+        Remove-Variable -Name preInstallRan -Scope Script -ErrorAction SilentlyContinue
+        $pkg = [pscustomobject]@{
+            content = "Prismcast"; npmPackage = "prismcast"
+            preInstallCommand = 'Set-Variable -Name preInstallRan -Value $true -Scope Script'
+        }
+
+        Install-WinUtilProgramNpm -Action Uninstall -Packages @($pkg)
+
+        $script:preInstallRan | Should -BeNullOrEmpty
+    }
+
+    It "does not require a preInstallCommand" {
+        $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
+
+        { Install-WinUtilProgramNpm -Action Install -Packages @($pkg) } | Should -Not -Throw
+    }
+
+    It "still attempts the npm install even when preInstallCommand itself fails" {
+        # Covers the fresh-install case specifically: "prismcast service stop" fails because
+        # prismcast isn't on PATH yet (npm hasn't installed it), which must not block the
+        # install that would actually put it there.
+        $pkg = [pscustomobject]@{
+            content = "Prismcast"; npmPackage = "prismcast"
+            preInstallCommand = 'throw "boom"'
+        }
+
+        Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
+
+        Should -Invoke -CommandName Start-Process -Times 1 -Exactly -ParameterFilter {
+            (@($ArgumentList) -join "|") -eq "/c|npm|install|-g|prismcast"
+        }
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "Pre-install step failed for Prismcast*"
+        }
+    }
+}
+
+Describe "Install-WinUtilProgramNpm process cleanup before install/uninstall" {
     BeforeEach {
         Mock Write-WinUtilLog { }
         Mock Update-WinUtilSessionPath { }
@@ -222,13 +292,18 @@ Describe "Install-WinUtilProgramNpm process cleanup before uninstall" {
         Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
     }
 
-    It "does not run the cleanup (or stop anything) on install" {
+    It "also stops a locking node.exe process on install (an in-place update hits the same EBUSY as uninstall)" {
+        # Regression guard for the actual reported bug: "npm install -g" on an already-installed,
+        # still-running Prismcast failed with the same EBUSY as uninstalling it - npm's rename of
+        # the existing package folder fails the same way regardless of which npm verb triggers it.
+        Mock Get-CimInstance {
+            [pscustomobject]@{ ProcessId = 4242; CommandLine = 'node.exe ".../node_modules/prismcast/dist/index.js"' }
+        } -ParameterFilter { $ClassName -eq "Win32_Process" -and $Filter -eq "Name='node.exe'" }
         $pkg = [pscustomobject]@{ content = "Prismcast"; npmPackage = "prismcast" }
 
         Install-WinUtilProgramNpm -Action Install -Packages @($pkg)
 
-        Should -Invoke -CommandName Get-CimInstance -Times 0 -Exactly
-        Should -Invoke -CommandName Stop-Process -Times 0 -Exactly
+        Should -Invoke -CommandName Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4242 }
     }
 
     It "does not throw or stop anything when no matching process is found" {

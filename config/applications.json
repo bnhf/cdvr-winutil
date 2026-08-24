@@ -267,6 +267,7 @@
         "installType": "npm",
         "npmPackage": "prismcast",
         "npmAllowScripts": "ffmpeg-for-homebridge",
+        "preInstallCommand": "prismcast service stop\nStart-Sleep -Milliseconds 500",
         "postInstallCommand": "prismcast service install",
         "preUninstallCommand": "prismcast service stop\nprismcast service uninstall\nStart-Sleep -Milliseconds 500",
         "requires": ["nodejs", "chrome"],
