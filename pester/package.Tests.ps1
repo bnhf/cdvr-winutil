@@ -188,6 +188,25 @@ Describe "Install-WinUtilProgramWinget" {
         Should -Invoke -CommandName Start-Process -Times 0 -Exactly
     }
 
+    It "pins a specific version and passes --exact when the program id carries an @version suffix" {
+        # Resolve-WinUtilPackagePrompts appends "@<version>" to a package's winget id for
+        # packages declaring wingetVersionPrompt (e.g. Node.js's version-choice prompt) - this
+        # must translate to winget's own --version/--exact flags, not a literal "@" in --id.
+        Install-WinUtilProgramWinget -Action Install -Programs @("OpenJS.NodeJS@24.13.0")
+
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "winget" -and
+                (@($ArgumentList) -join "|") -eq "install|--id|OpenJS.NodeJS|--accept-package-agreements|--accept-source-agreements|--source|winget|--silent|--version|24.13.0|--exact"
+        }
+    }
+
+    It "returns the original @version-suffixed id as .Program so callers can still map it back to a display name" {
+        $result = Install-WinUtilProgramWinget -Action Install -Programs @("OpenJS.NodeJS@24.13.0")
+
+        $result[0].Program | Should -Be "OpenJS.NodeJS@24.13.0"
+        $result[0].Success | Should -BeTrue
+    }
+
     It "returns a success result per program when the de-elevated attempt succeeds" {
         $result = Install-WinUtilProgramWinget -Action Install -Programs @("Git.Git")
 

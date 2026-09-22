@@ -20,6 +20,18 @@ function Resolve-WinUtilPackagePrompts {
         neither and are completely unaffected. Built as a new prompt object per package rather
         than mutating $package.prompts in place, since that array is the shared, cached catalog
         object every other install of the same app would also read.
+
+        A prompt declaring "choicesProvider" gets its "choices" resolved here too, the same way
+        "defaultEnvVar" resolves "default" - a live, bounded list (e.g. Node.js's version
+        picker, sourced from nodejs.org) that can't be expressed as static catalog JSON. The
+        provider name is a small switch below, not an arbitrary function name from JSON, so the
+        catalog can't invoke code it doesn't already know about.
+
+        A package declaring "wingetVersionPrompt" (naming one of its own prompts) gets that
+        prompt's chosen value appended to its own .winget id as "<id>@<version>" once the dialog
+        resolves - Install-WinUtilProgramWinget reads that suffix and passes it on as winget's
+        own --version. Only affects this run's in-memory package copy, never the shared catalog
+        object, and only when a winget id is actually present.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -44,12 +56,30 @@ function Resolve-WinUtilPackagePrompts {
                     $defaultValue = $envValue
                 }
             }
+            $choices = $null
+            if (-not [string]::IsNullOrWhiteSpace($prompt.choicesProvider)) {
+                $provided = switch ($prompt.choicesProvider) {
+                    "NodeJsVersions" { Get-WinUtilNodeJsVersionChoices }
+                    default {
+                        Write-WinUtilLog -Level "WARN" -Component "Install" -Message "$($package.content) prompt '$($prompt.name)' declares unknown choicesProvider '$($prompt.choicesProvider)'."
+                        $null
+                    }
+                }
+                if ($provided) {
+                    $choices = $provided.Choices
+                    if (-not [string]::IsNullOrWhiteSpace($provided.Default)) {
+                        $defaultValue = $provided.Default
+                    }
+                }
+            }
+
             [pscustomobject]@{
                 name      = $prompt.name
                 label     = $prompt.label
                 secret    = $prompt.secret
                 minLength = $prompt.minLength
                 default   = $defaultValue
+                choices   = $choices
             }
         })
 
@@ -61,6 +91,16 @@ function Resolve-WinUtilPackagePrompts {
         }
 
         $packageWithValues = $package | Add-Member -NotePropertyName PromptValues -NotePropertyValue $values -PassThru -Force
+
+        if (-not [string]::IsNullOrWhiteSpace($package.wingetVersionPrompt) -and
+            -not [string]::IsNullOrWhiteSpace($packageWithValues.winget) -and
+            $packageWithValues.winget -ne "na") {
+            $selectedVersion = $values[$package.wingetVersionPrompt]
+            if (-not [string]::IsNullOrWhiteSpace($selectedVersion)) {
+                $packageWithValues.winget = "$($packageWithValues.winget)@$selectedVersion"
+            }
+        }
+
         $result.Add($packageWithValues)
     }
 

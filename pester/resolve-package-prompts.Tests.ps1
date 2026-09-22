@@ -9,6 +9,7 @@ BeforeAll {
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
     function Show-WinUtilPromptDialog { param($Title, $Message, $Prompts) }
+    function Get-WinUtilNodeJsVersionChoices { }
 }
 
 Describe "Resolve-WinUtilPackagePrompts" {
@@ -114,5 +115,61 @@ Describe "Resolve-WinUtilPackagePrompts" {
         $prompt.secret | Should -Be $true
         $prompt.minLength | Should -Be 12
         $prompt.default | Should -BeNullOrEmpty
+    }
+
+    It "resolves a prompt's choices and default from its choicesProvider" {
+        Mock Get-WinUtilNodeJsVersionChoices {
+            [pscustomobject]@{
+                Choices = @([pscustomobject]@{ Value = "24.13.0"; Label = "24.13.0 (Current)" }, [pscustomobject]@{ Value = "22.11.0"; Label = "22.11.0 (LTS: Jod)" })
+                Default = "24.13.0"
+            }
+        }
+        $capturedPrompts = $null
+        Mock Show-WinUtilPromptDialog {
+            $script:capturedPrompts = $Prompts
+            @{ NODEJS_VERSION = "24.13.0" }
+        }
+        $package = [pscustomobject]@{
+            content = "Node.js"
+            winget  = "OpenJS.NodeJS"
+            wingetVersionPrompt = "NODEJS_VERSION"
+            prompts = @([pscustomobject]@{ name = "NODEJS_VERSION"; label = "Version"; default = "24.13.0"; choicesProvider = "NodeJsVersions" })
+        }
+
+        Resolve-WinUtilPackagePrompts -PackagesToInstall @($package) | Out-Null
+
+        $prompt = $script:capturedPrompts | Where-Object { $_.name -eq "NODEJS_VERSION" }
+        $prompt.default | Should -Be "24.13.0"
+        @($prompt.choices).Count | Should -Be 2
+        ($prompt.choices | Where-Object { $_.Value -eq "22.11.0" }).Label | Should -Be "22.11.0 (LTS: Jod)"
+    }
+
+    It "appends the chosen version to a package's winget id when wingetVersionPrompt is declared" {
+        Mock Show-WinUtilPromptDialog { @{ NODEJS_VERSION = "22.11.0" } }
+        $package = [pscustomobject]@{
+            content = "Node.js"
+            winget  = "OpenJS.NodeJS"
+            wingetVersionPrompt = "NODEJS_VERSION"
+            prompts = @([pscustomobject]@{ name = "NODEJS_VERSION"; label = "Version"; default = "24.13.0" })
+        }
+
+        $result = Resolve-WinUtilPackagePrompts -PackagesToInstall @($package)
+
+        $result[0].winget | Should -Be "OpenJS.NodeJS@22.11.0"
+    }
+
+    It "leaves a package's winget id unchanged when wingetVersionPrompt isn't declared" {
+        # Regression guard: every other prompt-declaring package in the catalog (Olivetin,
+        # Streaming Library Manager) must be completely unaffected by this new field.
+        Mock Show-WinUtilPromptDialog { @{ SLM_PORT = "7654" } }
+        $package = [pscustomobject]@{
+            content = "Streaming Library Manager"
+            winget  = "na"
+            prompts = @([pscustomobject]@{ name = "SLM_PORT"; label = "Port" })
+        }
+
+        $result = Resolve-WinUtilPackagePrompts -PackagesToInstall @($package)
+
+        $result[0].winget | Should -Be "na"
     }
 }

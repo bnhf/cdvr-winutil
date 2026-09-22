@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.08.24.1542
+    Version        : v2026.09.22.0737
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.08.24.1542"
+$sync.version = "v2026.09.22.0737"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -751,6 +751,65 @@ function Get-WinUtilLanIPAddress {
         return $null
     } catch {
         return $null
+    }
+}
+
+function Get-WinUtilNodeJsVersionChoices {
+    <#
+    .SYNOPSIS
+        Builds the version list for Node.js's install prompt: the latest release of each
+        active LTS line plus the latest Current release, fetched live from nodejs.org's own
+        release index - a finite, "reasonable" set rather than letting the user type anything.
+
+    .DESCRIPTION
+        v24.13.0 (WinUtil's own chosen default) is always present in the returned choices and
+        is always the default, even if nodejs.org can't be reached or that exact version isn't
+        (yet, or no longer) in the live index - the prompt must never come up empty just because
+        the fetch failed, and must never silently default the user to a version WinUtil hasn't
+        picked.
+
+        Must be called from the UI thread (via Resolve-WinUtilPackagePrompts, before the
+        install runspace starts) - same constraint as Show-WinUtilPromptDialog itself.
+
+    .OUTPUTS
+        [pscustomobject] with .Choices (array of {Value, Label}, newest first) and .Default
+        (string, always "24.13.0").
+    #>
+    $default = "24.13.0"
+    $choices = [System.Collections.Generic.List[object]]::new()
+
+    try {
+        $index = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -TimeoutSec 10
+
+        # nodejs.org returns releases newest-first, so the first entry is the current release
+        # regardless of LTS status.
+        $current = $index | Select-Object -First 1
+
+        $ltsLatestByMajor = @($index | Where-Object { $_.lts -and $_.lts -ne $false } |
+            Group-Object { ($_.version.TrimStart('v') -split '\.')[0] } |
+            ForEach-Object { $_.Group | Sort-Object { [version]($_.version.TrimStart('v')) } -Descending | Select-Object -First 1 })
+        $ltsLatestByMajor = @($ltsLatestByMajor | Sort-Object { [version]($_.version.TrimStart('v')) } -Descending)
+
+        if ($current -and (-not $current.lts -or $current.lts -eq $false)) {
+            $currentVersion = $current.version.TrimStart('v')
+            $choices.Add([pscustomobject]@{ Value = $currentVersion; Label = "$currentVersion (Current)" })
+        }
+
+        foreach ($release in $ltsLatestByMajor) {
+            $version = $release.version.TrimStart('v')
+            $choices.Add([pscustomobject]@{ Value = $version; Label = "$version (LTS: $($release.lts))" })
+        }
+    } catch {
+        Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Could not fetch the Node.js version list from nodejs.org - falling back to the default version only: $_"
+    }
+
+    if (-not ($choices | Where-Object { $_.Value -eq $default })) {
+        $choices.Insert(0, [pscustomobject]@{ Value = $default; Label = "$default (default)" })
+    }
+
+    return [pscustomobject]@{
+        Choices = $choices.ToArray()
+        Default = $default
     }
 }
 
@@ -2364,13 +2423,29 @@ Function Install-WinUtilProgramWinget {
             $program = $program.Substring("msstore:".Length)
         }
 
-        if ($Action -eq 'Install') {
-            $arguments = @("install", "--id", $program, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--silent")
-        } else {
-            $arguments = @("uninstall", "--id", $program, "--source", $source, "--silent")
+        # A trailing "@<version>" (attached by Resolve-WinUtilPackagePrompts for packages that
+        # declare "wingetVersionPrompt", e.g. Node.js's version-choice prompt) pins the install
+        # to that exact version instead of winget's default "latest". Kept out of $program itself
+        # so the returned .Program below still matches the id callers already index results by
+        # (Invoke-WPFInstall.ps1's packageNameById/postInstallCommandById, keyed the same way).
+        $wingetId = $program
+        $version = $null
+        $atIndex = $wingetId.IndexOf('@')
+        if ($atIndex -gt 0) {
+            $version = $wingetId.Substring($atIndex + 1)
+            $wingetId = $wingetId.Substring(0, $atIndex)
         }
 
-        Write-WinUtilLog -Component "Package" -Message "$Action winget package: $program (source: $source)"
+        if ($Action -eq 'Install') {
+            $arguments = @("install", "--id", $wingetId, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--silent")
+            if (-not [string]::IsNullOrWhiteSpace($version)) {
+                $arguments += @("--version", $version, "--exact")
+            }
+        } else {
+            $arguments = @("uninstall", "--id", $wingetId, "--source", $source, "--silent")
+        }
+
+        Write-WinUtilLog -Component "Package" -Message "$Action winget package: $wingetId$(if ($version) { " (version $version)" }) (source: $source)"
 
         $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
 
@@ -6084,6 +6159,18 @@ function Resolve-WinUtilPackagePrompts {
         neither and are completely unaffected. Built as a new prompt object per package rather
         than mutating $package.prompts in place, since that array is the shared, cached catalog
         object every other install of the same app would also read.
+
+        A prompt declaring "choicesProvider" gets its "choices" resolved here too, the same way
+        "defaultEnvVar" resolves "default" - a live, bounded list (e.g. Node.js's version
+        picker, sourced from nodejs.org) that can't be expressed as static catalog JSON. The
+        provider name is a small switch below, not an arbitrary function name from JSON, so the
+        catalog can't invoke code it doesn't already know about.
+
+        A package declaring "wingetVersionPrompt" (naming one of its own prompts) gets that
+        prompt's chosen value appended to its own .winget id as "<id>@<version>" once the dialog
+        resolves - Install-WinUtilProgramWinget reads that suffix and passes it on as winget's
+        own --version. Only affects this run's in-memory package copy, never the shared catalog
+        object, and only when a winget id is actually present.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -6108,12 +6195,30 @@ function Resolve-WinUtilPackagePrompts {
                     $defaultValue = $envValue
                 }
             }
+            $choices = $null
+            if (-not [string]::IsNullOrWhiteSpace($prompt.choicesProvider)) {
+                $provided = switch ($prompt.choicesProvider) {
+                    "NodeJsVersions" { Get-WinUtilNodeJsVersionChoices }
+                    default {
+                        Write-WinUtilLog -Level "WARN" -Component "Install" -Message "$($package.content) prompt '$($prompt.name)' declares unknown choicesProvider '$($prompt.choicesProvider)'."
+                        $null
+                    }
+                }
+                if ($provided) {
+                    $choices = $provided.Choices
+                    if (-not [string]::IsNullOrWhiteSpace($provided.Default)) {
+                        $defaultValue = $provided.Default
+                    }
+                }
+            }
+
             [pscustomobject]@{
                 name      = $prompt.name
                 label     = $prompt.label
                 secret    = $prompt.secret
                 minLength = $prompt.minLength
                 default   = $defaultValue
+                choices   = $choices
             }
         })
 
@@ -6125,6 +6230,16 @@ function Resolve-WinUtilPackagePrompts {
         }
 
         $packageWithValues = $package | Add-Member -NotePropertyName PromptValues -NotePropertyValue $values -PassThru -Force
+
+        if (-not [string]::IsNullOrWhiteSpace($package.wingetVersionPrompt) -and
+            -not [string]::IsNullOrWhiteSpace($packageWithValues.winget) -and
+            $packageWithValues.winget -ne "na") {
+            $selectedVersion = $values[$package.wingetVersionPrompt]
+            if (-not [string]::IsNullOrWhiteSpace($selectedVersion)) {
+                $packageWithValues.winget = "$($packageWithValues.winget)@$selectedVersion"
+            }
+        }
+
         $result.Add($packageWithValues)
     }
 
@@ -7367,9 +7482,12 @@ function Show-WinUtilPromptDialog {
         the entered value meets that length; optional "default" (string) pre-fills a non-secret
         field's text (ignored for secret fields - pre-filling a password field would show a
         stored secret back to whoever's looking at the screen, not a trade worth making for
-        typing convenience). Resolving a "default" dynamically (e.g. from an environment
-        variable) is the caller's job - see Resolve-WinUtilPackagePrompts - this function only
-        ever displays whatever plain string it's handed.
+        typing convenience). Optional "choices" (array of objects with "Value"/"Label") renders
+        a ComboBox instead of a free-text field, pre-selected to "default" (falling back to the
+        first choice) - for a bounded set of valid values, e.g. Node.js's version picker,
+        instead of letting the user type anything. Resolving "default"/"choices" dynamically
+        (e.g. from an environment variable or a live version list) is the caller's job - see
+        Resolve-WinUtilPackagePrompts - this function only ever displays whatever it's handed.
 
     .OUTPUTS
         Hashtable of name -> entered value, or $null if the dialog was cancelled.
@@ -7481,6 +7599,24 @@ function Show-WinUtilPromptDialog {
                 MinLength     = $minLength
                 Label         = $prompt.label
             }
+        } elseif ($prompt.choices -and @($prompt.choices).Count -gt 0) {
+            $combo = New-Object Windows.Controls.ComboBox
+            $combo.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
+            $combo.DisplayMemberPath = "Label"
+            $combo.SelectedValuePath = "Value"
+            $combo.ItemsSource = @($prompt.choices)
+            $combo.SelectedValue = [string]$prompt.default
+            if ($null -eq $combo.SelectedItem -and $combo.Items.Count -gt 0) {
+                $combo.SelectedIndex = 0
+            }
+            [void]$stack.Children.Add($combo)
+            $inputs[$prompt.name] = [pscustomobject]@{
+                Secret     = $false
+                IsCombo    = $true
+                ComboField = $combo
+                MinLength  = 0
+                Label      = $prompt.label
+            }
         } else {
             $field = New-Object Windows.Controls.TextBox
             $field.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
@@ -7533,6 +7669,8 @@ function Show-WinUtilPromptDialog {
             $info = $entry.Value
             $value = if ($info.Secret) {
                 if ($info.TextField.Visibility -eq [Windows.Visibility]::Visible) { $info.TextField.Text } else { $info.PasswordField.Password }
+            } elseif ($info.IsCombo) {
+                [string]$info.ComboField.SelectedValue
             } else {
                 $info.TextField.Text
             }
@@ -12128,10 +12266,19 @@ $sync.configs.applications = @'
     "category": "Foundational",
     "choco": "nodejs",
     "content": "Node.js",
-    "description": "JavaScript runtime required by npm-distributed Channels DVR tools such as Prismcast.",
+    "description": "JavaScript runtime required by npm-distributed Channels DVR tools such as Prismcast. Installing via winget (the default package manager) asks which version to install.",
     "link": "https://nodejs.org/",
     "handle": "OpenJS Foundation",
     "winget": "OpenJS.NodeJS",
+    "wingetVersionPrompt": "NODEJS_VERSION",
+    "prompts": [
+      {
+        "name": "NODEJS_VERSION",
+        "label": "Node.js version to install",
+        "default": "24.13.0",
+        "choicesProvider": "NodeJsVersions"
+      }
+    ],
     "foss": true
   },
   "WPFInstallwsl2": {

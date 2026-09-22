@@ -58,13 +58,29 @@ Function Install-WinUtilProgramWinget {
             $program = $program.Substring("msstore:".Length)
         }
 
-        if ($Action -eq 'Install') {
-            $arguments = @("install", "--id", $program, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--silent")
-        } else {
-            $arguments = @("uninstall", "--id", $program, "--source", $source, "--silent")
+        # A trailing "@<version>" (attached by Resolve-WinUtilPackagePrompts for packages that
+        # declare "wingetVersionPrompt", e.g. Node.js's version-choice prompt) pins the install
+        # to that exact version instead of winget's default "latest". Kept out of $program itself
+        # so the returned .Program below still matches the id callers already index results by
+        # (Invoke-WPFInstall.ps1's packageNameById/postInstallCommandById, keyed the same way).
+        $wingetId = $program
+        $version = $null
+        $atIndex = $wingetId.IndexOf('@')
+        if ($atIndex -gt 0) {
+            $version = $wingetId.Substring($atIndex + 1)
+            $wingetId = $wingetId.Substring(0, $atIndex)
         }
 
-        Write-WinUtilLog -Component "Package" -Message "$Action winget package: $program (source: $source)"
+        if ($Action -eq 'Install') {
+            $arguments = @("install", "--id", $wingetId, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--silent")
+            if (-not [string]::IsNullOrWhiteSpace($version)) {
+                $arguments += @("--version", $version, "--exact")
+            }
+        } else {
+            $arguments = @("uninstall", "--id", $wingetId, "--source", $source, "--silent")
+        }
+
+        Write-WinUtilLog -Component "Package" -Message "$Action winget package: $wingetId$(if ($version) { " (version $version)" }) (source: $source)"
 
         $process = Start-WinUtilProcessAsStandardUser -FilePath winget -ArgumentList $arguments
 

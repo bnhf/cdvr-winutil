@@ -67,10 +67,14 @@
         "category": "Foundational",
         "choco": "nodejs",
         "content": "Node.js",
-        "description": "JavaScript runtime required by npm-distributed Channels DVR tools such as Prismcast.",
+        "description": "JavaScript runtime required by npm-distributed Channels DVR tools such as Prismcast. Installing via winget (the default package manager) asks which version to install.",
         "link": "https://nodejs.org/",
         "handle": "OpenJS Foundation",
         "winget": "OpenJS.NodeJS",
+        "wingetVersionPrompt": "NODEJS_VERSION",
+        "prompts": [
+            { "name": "NODEJS_VERSION", "label": "Node.js version to install", "default": "24.13.0", "choicesProvider": "NodeJsVersions" }
+        ],
         "foss": true
     },
     "wsl2": {

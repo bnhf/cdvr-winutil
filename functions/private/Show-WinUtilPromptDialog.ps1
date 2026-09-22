@@ -16,9 +16,12 @@ function Show-WinUtilPromptDialog {
         the entered value meets that length; optional "default" (string) pre-fills a non-secret
         field's text (ignored for secret fields - pre-filling a password field would show a
         stored secret back to whoever's looking at the screen, not a trade worth making for
-        typing convenience). Resolving a "default" dynamically (e.g. from an environment
-        variable) is the caller's job - see Resolve-WinUtilPackagePrompts - this function only
-        ever displays whatever plain string it's handed.
+        typing convenience). Optional "choices" (array of objects with "Value"/"Label") renders
+        a ComboBox instead of a free-text field, pre-selected to "default" (falling back to the
+        first choice) - for a bounded set of valid values, e.g. Node.js's version picker,
+        instead of letting the user type anything. Resolving "default"/"choices" dynamically
+        (e.g. from an environment variable or a live version list) is the caller's job - see
+        Resolve-WinUtilPackagePrompts - this function only ever displays whatever it's handed.
 
     .OUTPUTS
         Hashtable of name -> entered value, or $null if the dialog was cancelled.
@@ -130,6 +133,24 @@ function Show-WinUtilPromptDialog {
                 MinLength     = $minLength
                 Label         = $prompt.label
             }
+        } elseif ($prompt.choices -and @($prompt.choices).Count -gt 0) {
+            $combo = New-Object Windows.Controls.ComboBox
+            $combo.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
+            $combo.DisplayMemberPath = "Label"
+            $combo.SelectedValuePath = "Value"
+            $combo.ItemsSource = @($prompt.choices)
+            $combo.SelectedValue = [string]$prompt.default
+            if ($null -eq $combo.SelectedItem -and $combo.Items.Count -gt 0) {
+                $combo.SelectedIndex = 0
+            }
+            [void]$stack.Children.Add($combo)
+            $inputs[$prompt.name] = [pscustomobject]@{
+                Secret     = $false
+                IsCombo    = $true
+                ComboField = $combo
+                MinLength  = 0
+                Label      = $prompt.label
+            }
         } else {
             $field = New-Object Windows.Controls.TextBox
             $field.Margin = New-Object Windows.Thickness(0, 0, 0, 4)
@@ -182,6 +203,8 @@ function Show-WinUtilPromptDialog {
             $info = $entry.Value
             $value = if ($info.Secret) {
                 if ($info.TextField.Visibility -eq [Windows.Visibility]::Visible) { $info.TextField.Text } else { $info.PasswordField.Password }
+            } elseif ($info.IsCombo) {
+                [string]$info.ComboField.SelectedValue
             } else {
                 $info.TextField.Text
             }
