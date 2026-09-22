@@ -1,7 +1,10 @@
 Function Install-WinUtilProgramDirect {
     <#
     .SYNOPSIS
-        Downloads and runs an installer from a direct URL - for packages with no winget/choco listing.
+        Downloads and runs an installer from a direct URL - for packages with no winget/choco
+        listing. A package with no "url" but a "command" instead runs that native PowerShell
+        command de-elevated (e.g. Playwright, whose "install" is a shell command against
+        whatever Python/Node.js is already present, not a downloadable installer file).
 
     .DESCRIPTION
         Runs the installer de-elevated (as the standard user), not inheriting WinUtil's own
@@ -29,6 +32,20 @@ Function Install-WinUtilProgramDirect {
         this to the shared window-level progress indicator so its label changes mid-install
         instead of sitting frozen on "Installing X" for however long the download/install
         actually takes.
+
+        The "command" branch writes the command to a temp .ps1 file (via
+        Set-WinUtilNoBomFileContent - see its own docstring for why a plain Set-Content isn't
+        used) and runs that de-elevated with Start-WinUtilProcessAsStandardUser, rather than
+        just invoking [scriptblock]::Create() in-process the way uninstallCommand does below in
+        Uninstall-WinUtilProgramDirect.ps1 - that runs at WinUtil's own elevated integrity, which
+        is fine for the mostly-registry/file-cleanup work uninstall commands do, but wrong here:
+        an install command like Playwright's browser download writes into the real user's
+        profile cache (%LOCALAPPDATA%), and running it elevated would leave that cache
+        admin-owned and unusable from the user's normal, non-elevated Playwright/Node/Python
+        runs afterward - the same class of problem this function's own de-elevation already
+        exists to avoid for every other branch below. A generous 600s timeout accounts for a
+        slow browser-binary download, well past Start-WinUtilProcessAsStandardUser's normal
+        300s default.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -49,6 +66,25 @@ Function Install-WinUtilProgramDirect {
         $installArgs = $package.args
 
         if ([string]::IsNullOrWhiteSpace($url)) {
+            if (-not [string]::IsNullOrWhiteSpace($package.command)) {
+                Write-WinUtilLog -Component "Package" -Message "Running install command for $name"
+                if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
+                $scriptPath = Join-Path $env:TEMP "$name-install.ps1"
+                try {
+                    Set-WinUtilNoBomFileContent -Path $scriptPath -Value $package.command
+                    $result = Start-WinUtilProcessAsStandardUser -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$scriptPath`"") -TimeoutSeconds 600
+                    if ($result.ExitCode -eq 0) {
+                        Write-WinUtilLog -Component "Package" -Message "$name installed."
+                    } else {
+                        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$name install command FAILED (exit code: $($result.ExitCode))."
+                    }
+                } catch {
+                    Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run install command for ${name}: $_"
+                } finally {
+                    Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+                }
+                continue
+            }
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Direct install for $name is missing a url."
             continue
         }

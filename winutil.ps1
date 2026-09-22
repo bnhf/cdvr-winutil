@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.09.22.0754
+    Version        : v2026.09.22.0808
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.09.22.0754"
+$sync.version = "v2026.09.22.0808"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -758,7 +758,7 @@ function Get-WinUtilNodeJsVersionChoices {
     <#
     .SYNOPSIS
         Builds the version list for Node.js's install prompt: the latest release of each of
-        the 3 most recent major versions (Current plus however many of those are still LTS),
+        the 5 most recent major versions (Current plus however many of those are still LTS),
         fetched live from nodejs.org's own release index - a finite, "reasonable" set rather
         than letting the user type anything.
 
@@ -804,7 +804,7 @@ function Get-WinUtilNodeJsVersionChoices {
             Group-Object { ($_.version.TrimStart('v') -split '\.')[0] } |
             ForEach-Object { $_.Group[0] } |
             Sort-Object { [int]($_.version.TrimStart('v') -split '\.')[0] } -Descending |
-            Select-Object -First 3)
+            Select-Object -First 5)
 
         foreach ($release in $latestByMajor) {
             $version = $release.version.TrimStart('v')
@@ -1934,7 +1934,10 @@ function Install-WinUtilProgramChoco {
 Function Install-WinUtilProgramDirect {
     <#
     .SYNOPSIS
-        Downloads and runs an installer from a direct URL - for packages with no winget/choco listing.
+        Downloads and runs an installer from a direct URL - for packages with no winget/choco
+        listing. A package with no "url" but a "command" instead runs that native PowerShell
+        command de-elevated (e.g. Playwright, whose "install" is a shell command against
+        whatever Python/Node.js is already present, not a downloadable installer file).
 
     .DESCRIPTION
         Runs the installer de-elevated (as the standard user), not inheriting WinUtil's own
@@ -1962,6 +1965,20 @@ Function Install-WinUtilProgramDirect {
         this to the shared window-level progress indicator so its label changes mid-install
         instead of sitting frozen on "Installing X" for however long the download/install
         actually takes.
+
+        The "command" branch writes the command to a temp .ps1 file (via
+        Set-WinUtilNoBomFileContent - see its own docstring for why a plain Set-Content isn't
+        used) and runs that de-elevated with Start-WinUtilProcessAsStandardUser, rather than
+        just invoking [scriptblock]::Create() in-process the way uninstallCommand does below in
+        Uninstall-WinUtilProgramDirect.ps1 - that runs at WinUtil's own elevated integrity, which
+        is fine for the mostly-registry/file-cleanup work uninstall commands do, but wrong here:
+        an install command like Playwright's browser download writes into the real user's
+        profile cache (%LOCALAPPDATA%), and running it elevated would leave that cache
+        admin-owned and unusable from the user's normal, non-elevated Playwright/Node/Python
+        runs afterward - the same class of problem this function's own de-elevation already
+        exists to avoid for every other branch below. A generous 600s timeout accounts for a
+        slow browser-binary download, well past Start-WinUtilProcessAsStandardUser's normal
+        300s default.
     #>
     param (
         [Parameter(Mandatory = $true)]
@@ -1982,6 +1999,25 @@ Function Install-WinUtilProgramDirect {
         $installArgs = $package.args
 
         if ([string]::IsNullOrWhiteSpace($url)) {
+            if (-not [string]::IsNullOrWhiteSpace($package.command)) {
+                Write-WinUtilLog -Component "Package" -Message "Running install command for $name"
+                if ($ProgressCallback) { try { & $ProgressCallback "Installing $name..." } catch {} }
+                $scriptPath = Join-Path $env:TEMP "$name-install.ps1"
+                try {
+                    Set-WinUtilNoBomFileContent -Path $scriptPath -Value $package.command
+                    $result = Start-WinUtilProcessAsStandardUser -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$scriptPath`"") -TimeoutSeconds 600
+                    if ($result.ExitCode -eq 0) {
+                        Write-WinUtilLog -Component "Package" -Message "$name installed."
+                    } else {
+                        Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "$name install command FAILED (exit code: $($result.ExitCode))."
+                    }
+                } catch {
+                    Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Failed to run install command for ${name}: $_"
+                } finally {
+                    Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+                }
+                continue
+            }
             Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "Direct install for $name is missing a url."
             continue
         }
@@ -12304,6 +12340,16 @@ $sync.configs.applications = @'
         "choicesProvider": "NodeJsVersions"
       }
     ],
+    "foss": true
+  },
+  "WPFInstallplaywright": {
+    "category": "Foundational",
+    "content": "Playwright",
+    "description": "Browser automation library used by some Channels DVR tooling. Installs the Chromium browser via Python if it's present (recommended), otherwise via Node.js/npx - install one of those first if you have neither.",
+    "link": "https://playwright.dev/",
+    "handle": "Microsoft",
+    "installType": "direct",
+    "command": "$python = Get-Command python -ErrorAction SilentlyContinue\nif ($python) {\n    Write-Host 'Installing Playwright via Python...'\n    python -m pip install --upgrade playwright\n    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n    python -m playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\n$npx = Get-Command npx -ErrorAction SilentlyContinue\nif ($npx) {\n    Write-Host 'Python not found - installing Playwright via Node.js/npx...'\n    npx --yes playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\nWrite-Error 'Playwright needs Python or Node.js installed first - install one of those, then try again.'\nexit 1",
     "foss": true
   },
   "WPFInstallwsl2": {

@@ -16,7 +16,8 @@ BeforeAll {
     function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec) }
     function Invoke-RestMethod { param($Uri, $Headers, $TimeoutSec) }
     function Set-WinUtilProcessForeground { param($Process) }
-    function Start-WinUtilProcessAsStandardUser { param($FilePath, $ArgumentList) }
+    function Set-WinUtilNoBomFileContent { param($Path, $Value) }
+    function Start-WinUtilProcessAsStandardUser { param($FilePath, $ArgumentList, $TimeoutSeconds) }
     function Start-WinUtilProcessAsStandardUserNoWait { param($FilePath, $ArgumentList) }
 
     function script:New-WinUtilDirectPackage {
@@ -91,6 +92,7 @@ Describe "Install-WinUtilProgramDirect" {
         Mock Write-WinUtilLog { }
         Mock Invoke-WebRequest { }
         Mock Set-WinUtilProcessForeground { }
+        Mock Set-WinUtilNoBomFileContent { }
         Mock Start-WinUtilProcessAsStandardUserNoWait { $true }
         Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 0 } }
         Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
@@ -147,6 +149,44 @@ Describe "Install-WinUtilProgramDirect" {
         }
 
         $messages | Should -Be @("Downloading Channels DVR...", "Installing Channels DVR...")
+    }
+
+    It "runs a package's command de-elevated when it has no url (e.g. Playwright)" {
+        $package = [pscustomobject]@{ content = "Playwright"; command = "python -m playwright install --with-deps chromium" }
+
+        Install-WinUtilProgramDirect -Packages @($package)
+
+        Should -Invoke -CommandName Set-WinUtilNoBomFileContent -Times 1 -Exactly -ParameterFilter {
+            $Value -eq "python -m playwright install --with-deps chromium"
+        }
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq "powershell.exe" -and
+                (@($ArgumentList) -join "|") -like "*-File|*Playwright-install.ps1*" -and
+                $TimeoutSeconds -eq 600
+        }
+        Should -Invoke -CommandName Invoke-WebRequest -Times 0 -Exactly
+    }
+
+    It "logs an error (not a throw) when a package's command exits non-zero" {
+        Mock Start-WinUtilProcessAsStandardUser { [pscustomobject]@{ ExitCode = 1 } }
+        $package = [pscustomobject]@{ content = "Playwright"; command = "exit 1" }
+
+        { Install-WinUtilProgramDirect -Packages @($package) } | Should -Not -Throw
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "*install command FAILED*"
+        }
+    }
+
+    It "still logs a missing-url error for a package with neither url nor command" {
+        $package = [pscustomobject]@{ content = "Nothing to install" }
+
+        Install-WinUtilProgramDirect -Packages @($package)
+
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter {
+            $Level -eq "ERROR" -and $Message -like "*missing a url*"
+        }
+        Should -Invoke -CommandName Start-WinUtilProcessAsStandardUser -Times 0 -Exactly
     }
 }
 

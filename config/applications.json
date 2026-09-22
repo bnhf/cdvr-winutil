@@ -77,6 +77,16 @@
         ],
         "foss": true
     },
+    "playwright": {
+        "category": "Foundational",
+        "content": "Playwright",
+        "description": "Browser automation library used by some Channels DVR tooling. Installs the Chromium browser via Python if it's present (recommended), otherwise via Node.js/npx - install one of those first if you have neither.",
+        "link": "https://playwright.dev/",
+        "handle": "Microsoft",
+        "installType": "direct",
+        "command": "$python = Get-Command python -ErrorAction SilentlyContinue\nif ($python) {\n    Write-Host 'Installing Playwright via Python...'\n    python -m pip install --upgrade playwright\n    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n    python -m playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\n$npx = Get-Command npx -ErrorAction SilentlyContinue\nif ($npx) {\n    Write-Host 'Python not found - installing Playwright via Node.js/npx...'\n    npx --yes playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\nWrite-Error 'Playwright needs Python or Node.js installed first - install one of those, then try again.'\nexit 1",
+        "foss": true
+    },
     "wsl2": {
         "category": "Foundational",
         "content": "WSL2",

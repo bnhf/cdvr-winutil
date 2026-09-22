@@ -2,7 +2,7 @@ function Get-WinUtilNodeJsVersionChoices {
     <#
     .SYNOPSIS
         Builds the version list for Node.js's install prompt: the latest release of each of
-        the 3 most recent major versions (Current plus however many of those are still LTS),
+        the 5 most recent major versions (Current plus however many of those are still LTS),
         fetched live from nodejs.org's own release index - a finite, "reasonable" set rather
         than letting the user type anything.
 
@@ -48,7 +48,7 @@ function Get-WinUtilNodeJsVersionChoices {
             Group-Object { ($_.version.TrimStart('v') -split '\.')[0] } |
             ForEach-Object { $_.Group[0] } |
             Sort-Object { [int]($_.version.TrimStart('v') -split '\.')[0] } -Descending |
-            Select-Object -First 3)
+            Select-Object -First 5)
 
         foreach ($release in $latestByMajor) {
             $version = $release.version.TrimStart('v')
