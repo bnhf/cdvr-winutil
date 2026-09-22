@@ -116,7 +116,15 @@ function Initialize-InstallAppEntry {
             # ADB Bridge) it tells WPF's icon decoder which embedded frame to pick rather than
             # leaving that to chance.
             $bitmap.DecodePixelWidth = 64
-            $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            # Deliberately NOT BitmapCacheOption.OnLoad: for a remote UriSource, OnLoad makes
+            # EndInit() block the calling thread until the full download+decode finishes, so
+            # with every catalog entry now resolving to a remote icon (an explicit "icon" or
+            # the Google favicon fallback), building a category's tiles serialized N blocking
+            # HTTPS round-trips on the UI thread - a real, confirmed startup slowdown. The
+            # default (OnDemand) downloads/decodes off the UI thread and the Image updates via
+            # ImageFailed/normal binding once ready, same as this app's icons behaved before
+            # this was switched to an explicit BitmapImage (still image-failure-safe via
+            # Add_ImageFailed below).
             $bitmap.EndInit()
             $logo.Source = $bitmap
 
