@@ -7,7 +7,7 @@
     Author         : Chris Titus @christitustech
     Runspace Author: @DeveloperDurp
     GitHub         : https://github.com/ChrisTitusTech
-    Version        : v2026.09.22.0838
+    Version        : v2026.09.22.0844
 #>
 
 param (
@@ -66,7 +66,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 
 # Variable to sync between runspaces
 $sync = [Hashtable]::Synchronized(@{})
-$sync.version = "v2026.09.22.0838"
+$sync.version = "v2026.09.22.0844"
 $sync.configs = @{}
 $sync.Buttons = [System.Collections.Generic.List[PSObject]]::new()
 $sync.preferences = @{}
@@ -12356,7 +12356,7 @@ $sync.configs.applications = @'
     "link": "https://playwright.dev/",
     "handle": "Microsoft",
     "installType": "direct",
-    "command": "$python = Get-Command python -ErrorAction SilentlyContinue\nif ($python) {\n    Write-Host 'Installing Playwright via Python...'\n    python -m pip install --upgrade playwright\n    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n    python -m playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\n$npx = Get-Command npx -ErrorAction SilentlyContinue\nif ($npx) {\n    Write-Host 'Python not found - installing Playwright via Node.js/npx...'\n    npx --yes playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\nWrite-Error 'Playwright needs Python or Node.js installed first - install one of those, then try again.'\nexit 1",
+    "command": "function Test-RealPython {\n    $cmd = Get-Command python -ErrorAction SilentlyContinue\n    if (-not $cmd -or $cmd.Source -like '*\\WindowsApps\\python.exe') {\n        # Windows ships a 'python' App Execution Alias stub on PATH even when Python isn't\n        # actually installed - it resolves via Get-Command but fails fast (exit 9009) when run\n        # non-interactively, so a plain Get-Command check alone would wrongly take this branch.\n        return $false\n    }\n    python --version *> $null\n    return ($LASTEXITCODE -eq 0)\n}\nif (Test-RealPython) {\n    Write-Host 'Installing Playwright via Python...'\n    python -m pip install --upgrade playwright\n    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n    python -m playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\n$npx = Get-Command npx -ErrorAction SilentlyContinue\nif ($npx) {\n    Write-Host 'Python not found - installing Playwright via Node.js/npx...'\n    npx --yes playwright install --with-deps chromium\n    exit $LASTEXITCODE\n}\nWrite-Error 'Playwright needs Python or Node.js installed first - install one of those, then try again.'\nexit 1",
     "foss": true
   },
   "WPFInstallwsl2": {
