@@ -73,7 +73,7 @@
         "winget": "OpenJS.NodeJS",
         "wingetVersionPrompt": "NODEJS_VERSION",
         "prompts": [
-            { "name": "NODEJS_VERSION", "label": "Node.js version to install", "default": "24.13.0", "choicesProvider": "NodeJsVersions" }
+            { "name": "NODEJS_VERSION", "label": "Node.js version to install", "choicesProvider": "NodeJsVersions" }
         ],
         "foss": true
     },

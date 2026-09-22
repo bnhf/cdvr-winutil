@@ -23,9 +23,11 @@ function Resolve-WinUtilPackagePrompts {
 
         A prompt declaring "choicesProvider" gets its "choices" resolved here too, the same way
         "defaultEnvVar" resolves "default" - a live, bounded list (e.g. Node.js's version
-        picker, sourced from nodejs.org) that can't be expressed as static catalog JSON. The
-        provider name is a small switch below, not an arbitrary function name from JSON, so the
-        catalog can't invoke code it doesn't already know about.
+        picker, sourced from winget's own catalog so every offered choice is guaranteed
+        installable - see Get-WinUtilNodeJsVersionChoices for why that matters) that can't be
+        expressed as static catalog JSON. The provider name is a small switch below, not an
+        arbitrary function name from JSON, so the catalog can't invoke code it doesn't already
+        know about.
 
         A package declaring "wingetVersionPrompt" (naming one of its own prompts) gets that
         prompt's chosen value appended to its own .winget id as "<id>@<version>" once the dialog
