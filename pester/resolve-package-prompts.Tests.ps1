@@ -144,23 +144,29 @@ Describe "Resolve-WinUtilPackagePrompts" {
         ($prompt.choices | Where-Object { $_.Value -eq "22.11.0" }).Label | Should -Be "22.11.0 (LTS: Jod)"
     }
 
-    It "appends the chosen version to a package's winget id when wingetVersionPrompt is declared" {
+    It "substitutes the chosen version into a package's url and switches it to installType direct when versionPrompt is declared" {
+        # Node.js's actual case: winget doesn't reliably have every offered version (see
+        # Get-WinUtilNodeJsVersionChoices), so the chosen version installs via a direct download
+        # from nodejs.org instead - .winget is left alone for uninstall/detection.
         Mock Show-WinUtilPromptDialog { @{ NODEJS_VERSION = "22.11.0" } }
         $package = [pscustomobject]@{
             content = "Node.js"
             winget  = "OpenJS.NodeJS"
-            wingetVersionPrompt = "NODEJS_VERSION"
+            url     = "https://nodejs.org/dist/v{VERSION}/node-v{VERSION}-x64.msi"
+            versionPrompt = "NODEJS_VERSION"
             prompts = @([pscustomobject]@{ name = "NODEJS_VERSION"; label = "Version"; default = "24.13.0" })
         }
 
         $result = Resolve-WinUtilPackagePrompts -PackagesToInstall @($package)
 
-        $result[0].winget | Should -Be "OpenJS.NodeJS@22.11.0"
+        $result[0].url | Should -Be "https://nodejs.org/dist/v22.11.0/node-v22.11.0-x64.msi"
+        $result[0].installType | Should -Be "direct"
+        $result[0].winget | Should -Be "OpenJS.NodeJS"
     }
 
-    It "leaves a package's winget id unchanged when wingetVersionPrompt isn't declared" {
+    It "leaves a package's url and installType unchanged when versionPrompt isn't declared" {
         # Regression guard: every other prompt-declaring package in the catalog (Olivetin,
-        # Streaming Library Manager) must be completely unaffected by this new field.
+        # Streaming Library Manager) must be completely unaffected by this field.
         Mock Show-WinUtilPromptDialog { @{ SLM_PORT = "7654" } }
         $package = [pscustomobject]@{
             content = "Streaming Library Manager"
@@ -171,5 +177,6 @@ Describe "Resolve-WinUtilPackagePrompts" {
         $result = Resolve-WinUtilPackagePrompts -PackagesToInstall @($package)
 
         $result[0].winget | Should -Be "na"
+        $result[0].PSObject.Properties.Name | Should -Not -Contain "installType"
     }
 }

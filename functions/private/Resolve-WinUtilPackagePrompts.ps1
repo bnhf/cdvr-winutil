@@ -23,17 +23,19 @@ function Resolve-WinUtilPackagePrompts {
 
         A prompt declaring "choicesProvider" gets its "choices" resolved here too, the same way
         "defaultEnvVar" resolves "default" - a live, bounded list (e.g. Node.js's version
-        picker, sourced from winget's own catalog so every offered choice is guaranteed
-        installable - see Get-WinUtilNodeJsVersionChoices for why that matters) that can't be
-        expressed as static catalog JSON. The provider name is a small switch below, not an
-        arbitrary function name from JSON, so the catalog can't invoke code it doesn't already
-        know about.
+        picker, sourced from nodejs.org) that can't be expressed as static catalog JSON. The
+        provider name is a small switch below, not an arbitrary function name from JSON, so the
+        catalog can't invoke code it doesn't already know about.
 
-        A package declaring "wingetVersionPrompt" (naming one of its own prompts) gets that
-        prompt's chosen value appended to its own .winget id as "<id>@<version>" once the dialog
-        resolves - Install-WinUtilProgramWinget reads that suffix and passes it on as winget's
-        own --version. Only affects this run's in-memory package copy, never the shared catalog
-        object, and only when a winget id is actually present.
+        A package declaring "versionPrompt" (naming one of its own prompts) gets every
+        "{VERSION}" placeholder in its own .url substituted with that prompt's chosen value, and
+        .installType forced to "direct", once the dialog resolves - this only touches this run's
+        in-memory package copy, never the shared catalog object, so the package's static
+        winget/choco ids (used for uninstall/detection elsewhere) are untouched. Node.js is the
+        motivating case: winget doesn't publish it as one package with full version history (see
+        Get-WinUtilNodeJsVersionChoices for the confirmed specifics), so pinning an exact chosen
+        version installs it by downloading that version's real installer straight from
+        nodejs.org instead, which never prunes old releases.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -94,12 +96,12 @@ function Resolve-WinUtilPackagePrompts {
 
         $packageWithValues = $package | Add-Member -NotePropertyName PromptValues -NotePropertyValue $values -PassThru -Force
 
-        if (-not [string]::IsNullOrWhiteSpace($package.wingetVersionPrompt) -and
-            -not [string]::IsNullOrWhiteSpace($packageWithValues.winget) -and
-            $packageWithValues.winget -ne "na") {
-            $selectedVersion = $values[$package.wingetVersionPrompt]
+        if (-not [string]::IsNullOrWhiteSpace($package.versionPrompt) -and
+            -not [string]::IsNullOrWhiteSpace($packageWithValues.url)) {
+            $selectedVersion = $values[$package.versionPrompt]
             if (-not [string]::IsNullOrWhiteSpace($selectedVersion)) {
-                $packageWithValues.winget = "$($packageWithValues.winget)@$selectedVersion"
+                $packageWithValues.url = $packageWithValues.url -replace '\{VERSION\}', $selectedVersion
+                $packageWithValues | Add-Member -NotePropertyName installType -NotePropertyValue "direct" -Force
             }
         }
 

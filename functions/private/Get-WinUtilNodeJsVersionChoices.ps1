@@ -2,87 +2,88 @@ function Get-WinUtilNodeJsVersionChoices {
     <#
     .SYNOPSIS
         Builds the version list for Node.js's install prompt: the latest release of each of
-        the 5 most recent major versions that winget can actually install, sourced from
-        winget's own catalog ("winget show --id OpenJS.NodeJS --versions") - a finite,
-        "reasonable" set rather than letting the user type anything.
+        the 5 most recent major versions (Current plus however many of those are still LTS),
+        fetched live from nodejs.org's own release index - a finite, "reasonable" set rather
+        than letting the user type anything.
 
     .DESCRIPTION
-        Deliberately sourced from winget itself, not nodejs.org's own release index (an earlier
-        version of this function used that instead). Confirmed live: this is a real, reported
-        install failure, not a theoretical one - winget-pkgs' Node.js manifests don't track
-        every nodejs.org patch release (e.g. 24.11.0 through 24.13.0 don't exist in winget's
-        catalog at all, which jumps straight from 24.10.0 to 25.0.0), so a version picked from
-        nodejs.org's list can be entirely unavailable to Install-WinUtilProgramWinget's
-        "--version X --exact", which then fails outright with winget's own "No version found
-        matching: X" - exactly what happened. Sourcing straight from winget's catalog guarantees
-        every offered choice is actually installable. The tradeoff: winget's plain version list
-        carries no LTS/Current metadata the way nodejs.org's index.json does, so choices are
-        shown as plain version numbers rather than labelled "(LTS: ...)"/"(Current)" - accuracy
-        over cosmetics.
+        v24.13.0 (WinUtil's own chosen default) is always present in the returned choices and
+        is always the default, even if nodejs.org can't be reached or that exact version isn't
+        (yet, or no longer) in the live index - the prompt must never come up empty just because
+        the fetch failed, and must never silently default the user to a version WinUtil hasn't
+        picked.
+
+        Deliberately sourced from nodejs.org, NOT winget - a previous version of this function
+        tried sourcing from winget's own catalog instead ("winget show --id OpenJS.NodeJS
+        --versions"), reasoning that would guarantee every offered choice installs cleanly. That
+        broke worse: confirmed live, winget doesn't publish Node.js as one package with full
+        history - it's split across OpenJS.NodeJS (only the newest ~3 majors, pruned as they
+        age), OpenJS.NodeJS.LTS (ONLY the current Active LTS major, e.g. just 24.x today), and a
+        separate OpenJS.NodeJS.<N> per older major once it ages out of the main package. No
+        single id ever covers 5 majors, and the exact id needed for a given version (e.g.
+        24.13.0, which lives in OpenJS.NodeJS.LTS but not OpenJS.NodeJS) varies per version -
+        pinning against one static id could only ever install a fraction of what was offered.
+        nodejs.org's own release archive, by contrast, keeps every version forever at a
+        predictable URL - see Install-WinUtilProgramDirect's "command"/url handling and this
+        package's "url"/"versionPrompt" fields in config/applications.json, which install the
+        chosen version by downloading its MSI directly from nodejs.org rather than through
+        winget at all. That sidesteps winget's catalog fragmentation entirely, so this function
+        is free to offer whatever's actually the 5 most recent major releases.
 
         A successful fetch is cached for the life of the process (module-level $script:
         variable) - this is called fresh every time the Node.js install prompt opens, and
-        winget's catalog can't meaningfully change within a single WinUtil run, so there's no
-        reason to re-query and make the dialog wait past the very first open. A failed fetch is
-        deliberately NOT cached, so a transient issue doesn't permanently downgrade the rest of
-        the session to the no-version-pinned fallback.
-
-        If winget's catalog can't be queried at all (or returns nothing parseable), the one
-        fallback choice has an empty Value, not a hardcoded version guess - Resolve-
-        WinUtilPackagePrompts treats an empty PromptValues entry as "no version selected" and
-        skips appending "@version" to the winget id, so the install falls back to a plain,
-        unpinned "winget install --id OpenJS.NodeJS" (whatever winget itself resolves as
-        latest/upgrade target) instead of risking a second hardcoded version that may equally
-        not exist in the catalog.
+        nodejs.org's release list can't meaningfully change within a single WinUtil run, so
+        there's no reason to re-fetch and make the dialog wait on the network past the very
+        first open. A failed fetch is deliberately NOT cached, so a transient outage doesn't
+        permanently downgrade the rest of the session to the single-choice fallback.
 
         Must be called from the UI thread (via Resolve-WinUtilPackagePrompts, before the
         install runspace starts) - same constraint as Show-WinUtilPromptDialog itself.
 
     .OUTPUTS
-        [pscustomobject] with .Choices (array of {Value, Label}, newest first) and .Default.
+        [pscustomobject] with .Choices (array of {Value, Label}, newest first) and .Default
+        (string, always "24.13.0").
     #>
     if ($script:WinUtilNodeJsVersionChoicesCache) {
         return $script:WinUtilNodeJsVersionChoicesCache
     }
 
+    $default = "24.13.0"
     $choices = [System.Collections.Generic.List[object]]::new()
     $fetchSucceeded = $false
 
     try {
-        $output = & winget show --id OpenJS.NodeJS --versions --accept-source-agreements --disable-interactivity 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "winget exited with code $LASTEXITCODE"
-        }
+        # A short timeout matters here specifically because this call blocks the UI thread -
+        # Resolve-WinUtilPackagePrompts needs the choices before it can even show the dialog,
+        # so a slow/unresponsive nodejs.org would otherwise make the whole prompt hang rather
+        # than just falling back quickly to the one guaranteed default choice below.
+        $index = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -TimeoutSec 4
 
-        # winget's own version list output is one bare "24.10.0"-style line per version, mixed
-        # in with header/separator lines ("Found Node.js [...]", "Version", "-------") - the
-        # anchored N.N.N pattern keeps only the version lines.
-        $versions = @($output | Where-Object { $_ -match '^\d+\.\d+\.\d+$' })
-        if ($versions.Count -eq 0) {
-            throw "no versions parsed from winget's output"
-        }
-
-        $latestByMajor = @($versions |
-            Group-Object { ($_ -split '\.')[0] } |
-            ForEach-Object { ($_.Group | Sort-Object { [version]$_ } -Descending | Select-Object -First 1) } |
-            Sort-Object { [int](($_ -split '\.')[0]) } -Descending |
+        # nodejs.org returns releases newest-first, so grouping by major and taking each
+        # group's first entry gives each major's latest release without an extra sort.
+        $latestByMajor = @($index |
+            Group-Object { ($_.version.TrimStart('v') -split '\.')[0] } |
+            ForEach-Object { $_.Group[0] } |
+            Sort-Object { [int]($_.version.TrimStart('v') -split '\.')[0] } -Descending |
             Select-Object -First 5)
 
-        foreach ($version in $latestByMajor) {
-            $choices.Add([pscustomobject]@{ Value = $version; Label = $version })
+        foreach ($release in $latestByMajor) {
+            $version = $release.version.TrimStart('v')
+            $label = if ($release.lts -and $release.lts -ne $false) { "$version (LTS: $($release.lts))" } else { "$version (Current)" }
+            $choices.Add([pscustomobject]@{ Value = $version; Label = $label })
         }
         $fetchSucceeded = $true
     } catch {
-        Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Could not fetch Node.js's available versions from winget - falling back to an unpinned install: $_"
+        Write-WinUtilLog -Level "WARN" -Component "Install" -Message "Could not fetch the Node.js version list from nodejs.org - falling back to the default version only: $_"
     }
 
-    if ($choices.Count -eq 0) {
-        $choices.Add([pscustomobject]@{ Value = ""; Label = "Latest available (couldn't check specific versions)" })
+    if (-not ($choices | Where-Object { $_.Value -eq $default })) {
+        $choices.Insert(0, [pscustomobject]@{ Value = $default; Label = "$default (default)" })
     }
 
     $choicesResult = [pscustomobject]@{
         Choices = $choices.ToArray()
-        Default = $choices[0].Value
+        Default = $default
     }
     if ($fetchSucceeded) {
         $script:WinUtilNodeJsVersionChoicesCache = $choicesResult

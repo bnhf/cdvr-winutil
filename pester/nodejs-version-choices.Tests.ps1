@@ -8,18 +8,6 @@ BeforeAll {
     . (Join-Path $script:repoRoot "functions\private\Get-WinUtilNodeJsVersionChoices.ps1")
 
     function Write-WinUtilLog { param($Message, $Level, $Component) }
-    function winget {
-        param([Parameter(ValueFromRemainingArguments = $true)]$Arguments)
-    }
-
-    # winget's real CLI output for "show --id OpenJS.NodeJS --versions": header/separator lines
-    # plus one bare "N.N.N" version per line, newest first. Confirmed live - this is the actual
-    # shape that broke the earlier nodejs.org-sourced version, since 24.11.0-24.13.0 simply
-    # don't appear here even though nodejs.org itself published them.
-    function script:New-WinUtilWingetVersionOutput {
-        param([string[]]$Versions)
-        @("Found Node.js [OpenJS.NodeJS]", "Version", "-------") + $Versions
-    }
 }
 
 Describe "Get-WinUtilNodeJsVersionChoices" {
@@ -29,96 +17,95 @@ Describe "Get-WinUtilNodeJsVersionChoices" {
         # file, since that's where it was dot-sourced) - cleared before every test so results
         # from one test can't leak into the next via the cache.
         Remove-Variable -Name WinUtilNodeJsVersionChoicesCache -Scope Script -ErrorAction SilentlyContinue
-        $global:LASTEXITCODE = 0
+    }
+
+    It "always defaults to 24.13.0" {
+        Mock Invoke-RestMethod { throw "offline" }
+
+        $result = Get-WinUtilNodeJsVersionChoices
+
+        $result.Default | Should -Be "24.13.0"
+    }
+
+    It "falls back to a single default-only choice when nodejs.org can't be reached" {
+        Mock Invoke-RestMethod { throw "offline" }
+
+        $result = Get-WinUtilNodeJsVersionChoices
+
+        @($result.Choices).Count | Should -Be 1
+        $result.Choices[0].Value | Should -Be "24.13.0"
+        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Level -eq "WARN" }
     }
 
     It "returns only the latest release of each of the 5 most recent major versions" {
-        Mock winget {
-            $global:LASTEXITCODE = 0
-            New-WinUtilWingetVersionOutput -Versions @(
-                "26.7.0", "26.6.0",
-                "25.9.0", "25.8.2",
-                "24.10.0", "24.9.0",
-                "23.5.0",
-                "22.11.0", "22.10.0",
-                "20.18.0"
+        Mock Invoke-RestMethod {
+            @(
+                [pscustomobject]@{ version = "v25.1.0"; lts = $false }
+                [pscustomobject]@{ version = "v24.13.0"; lts = "Krypton" }
+                [pscustomobject]@{ version = "v24.12.0"; lts = "Krypton" }
+                [pscustomobject]@{ version = "v23.5.0"; lts = $false }
+                [pscustomobject]@{ version = "v22.11.0"; lts = "Jod" }
+                [pscustomobject]@{ version = "v22.10.0"; lts = "Jod" }
+                [pscustomobject]@{ version = "v21.7.0"; lts = $false }
+                [pscustomobject]@{ version = "v20.18.0"; lts = "Iron" }
+                [pscustomobject]@{ version = "v18.20.0"; lts = "Hydrogen" }
             )
         }
 
         $result = Get-WinUtilNodeJsVersionChoices
 
         $values = $result.Choices | ForEach-Object { $_.Value }
-        $values | Should -Be @("26.7.0", "25.9.0", "24.10.0", "23.5.0", "22.11.0")
+        $values | Should -Be @("25.1.0", "24.13.0", "23.5.0", "22.11.0", "21.7.0")
+        ($result.Choices | Where-Object { $_.Value -eq "25.1.0" }).Label | Should -Be "25.1.0 (Current)"
+        ($result.Choices | Where-Object { $_.Value -eq "22.11.0" }).Label | Should -Be "22.11.0 (LTS: Jod)"
         $values | Should -Not -Contain "20.18.0"
     }
 
-    It "regression guard: never offers a version winget's own catalog doesn't have (e.g. 24.13.0)" {
-        # Confirmed live: winget-pkgs' OpenJS.NodeJS manifests jump straight from 24.10.0 to
-        # 25.0.0 - 24.11.0 through 24.13.0 don't exist there even though nodejs.org published
-        # them, so a version picked from nodejs.org's own release index (the earlier
-        # implementation's source) could be entirely uninstallable via winget's own
-        # "--version X --exact", failing with "No version found matching: X". This test's mock
-        # output is exactly that real gap.
-        Mock winget {
-            $global:LASTEXITCODE = 0
-            New-WinUtilWingetVersionOutput -Versions @("25.0.0", "24.10.0", "24.9.0")
+    It "doesn't duplicate 24.13.0 when it's already among the 5 most recent majors" {
+        Mock Invoke-RestMethod {
+            @([pscustomobject]@{ version = "v24.13.0"; lts = "Krypton" }, [pscustomobject]@{ version = "v22.11.0"; lts = "Jod" })
         }
 
         $result = Get-WinUtilNodeJsVersionChoices
 
-        $result.Choices | Where-Object { $_.Value -eq "24.13.0" } | Should -BeNullOrEmpty
-        $result.Default | Should -Not -Be "24.13.0"
+        @($result.Choices | Where-Object { $_.Value -eq "24.13.0" }).Count | Should -Be 1
     }
 
-    It "defaults to the newest available version" {
-        Mock winget {
-            $global:LASTEXITCODE = 0
-            New-WinUtilWingetVersionOutput -Versions @("26.7.0", "24.10.0")
+    It "adds 24.13.0 as an extra choice when it falls outside the 5 most recent majors" {
+        Mock Invoke-RestMethod {
+            @(
+                [pscustomobject]@{ version = "v30.0.0"; lts = $false }
+                [pscustomobject]@{ version = "v29.0.0"; lts = "Lithium" }
+                [pscustomobject]@{ version = "v28.0.0"; lts = $false }
+                [pscustomobject]@{ version = "v27.0.0"; lts = "Helium" }
+                [pscustomobject]@{ version = "v26.0.0"; lts = $false }
+                [pscustomobject]@{ version = "v22.11.0"; lts = "Jod" }
+            )
         }
 
         $result = Get-WinUtilNodeJsVersionChoices
 
-        $result.Default | Should -Be "26.7.0"
+        @($result.Choices).Count | Should -Be 6
+        $result.Choices | Where-Object { $_.Value -eq "24.13.0" } | Should -Not -BeNullOrEmpty
     }
 
-    It "falls back to a single unpinned choice (empty Value) when winget can't be queried" {
-        Mock winget { $global:LASTEXITCODE = 1; "" }
-
-        $result = Get-WinUtilNodeJsVersionChoices
-
-        @($result.Choices).Count | Should -Be 1
-        $result.Choices[0].Value | Should -Be ""
-        $result.Default | Should -Be ""
-        Should -Invoke -CommandName Write-WinUtilLog -Times 1 -Exactly -ParameterFilter { $Level -eq "WARN" }
-    }
-
-    It "falls back to a single unpinned choice when winget's output has no parseable version lines" {
-        Mock winget { $global:LASTEXITCODE = 0; "Found Node.js [OpenJS.NodeJS]" }
-
-        $result = Get-WinUtilNodeJsVersionChoices
-
-        @($result.Choices).Count | Should -Be 1
-        $result.Choices[0].Value | Should -Be ""
-    }
-
-    It "caches a successful fetch so a second call doesn't query winget again" {
-        Mock winget {
-            $global:LASTEXITCODE = 0
-            New-WinUtilWingetVersionOutput -Versions @("24.10.0")
+    It "caches a successful fetch so a second call doesn't hit the network again" {
+        Mock Invoke-RestMethod {
+            @([pscustomobject]@{ version = "v24.13.0"; lts = "Krypton" })
         }
 
         Get-WinUtilNodeJsVersionChoices | Out-Null
         Get-WinUtilNodeJsVersionChoices | Out-Null
 
-        Should -Invoke -CommandName winget -Times 1 -Exactly
+        Should -Invoke -CommandName Invoke-RestMethod -Times 1 -Exactly
     }
 
-    It "does not cache a failed fetch, so a later call retries winget" {
-        Mock winget { $global:LASTEXITCODE = 1; "" }
+    It "does not cache a failed fetch, so a later call retries the network" {
+        Mock Invoke-RestMethod { throw "offline" }
 
         Get-WinUtilNodeJsVersionChoices | Out-Null
         Get-WinUtilNodeJsVersionChoices | Out-Null
 
-        Should -Invoke -CommandName winget -Times 2 -Exactly
+        Should -Invoke -CommandName Invoke-RestMethod -Times 2 -Exactly
     }
 }
